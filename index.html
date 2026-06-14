@@ -423,9 +423,17 @@ const QR="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAZoAAAGaCAIAAAC5ZBI0AAAJ
    (3) 아래 url/anon 에 Project URL + anon public key 붙여넣기, (4) 재배포.
    자세한 내용은 README 참고.
    ===================================================================== */
-const CONFIG={ url:"https://reexzcvjkoiectgedalh.supabase.co", anon:"sb_publishable_bMITmpGvPyEPW_MU6EyOew_ZOmTT5AM" };
-let sb=null, BACKEND=false, UID=null, _syncT=null, _surveyT=null;
+const CONFIG={ url:"https://reexzcvjkoiectgedalh.supabase.co", anon:"sb_publishable_bMITmpGvPyEPW_MU6EyOew_ZOmTT5AM",
+  // appUrl: 배포된 앱의 공개 주소(QR·링크에 사용). 예: "https://your-app.vercel.app/"
+  // 비워두면 현재 주소를 사용해요(로컬 파일 file://에서는 QR이 동작하지 않으니 배포 주소를 넣어 주세요).
+  appUrl:"https://onandct.vercel.app" };
+let sb=null, BACKEND=false, UID=null, _syncT=null, _surveyT=null, SERVER_FB=null, SERVER_REACT=null;
 function backendReady(){return !!(BACKEND&&sb&&UID);}
+// QR·공유 링크용 절대 주소(해시 제외). appUrl이 있으면 우선, 없으면 현재 주소.
+function appBase(){const b=(CONFIG.appUrl||'').trim();return (b?b:(location.origin+location.pathname)).replace(/#.*$/,'');}
+function isLocalFile(){return location.protocol==='file:'&&!(CONFIG.appUrl||'').trim();}
+// 동적 QR 이미지 URL 생성
+function qrImg(data,size){return 'https://api.qrserver.com/v1/create-qr-code/?size='+(size||220)+'x'+(size||220)+'&margin=0&data='+encodeURIComponent(data);}
 async function dbInit(){
   try{
     if(!CONFIG.url||!CONFIG.anon||!window.supabase)return;
@@ -436,20 +444,23 @@ async function dbInit(){
     if(BACKEND)console.info('[OnAnd] backend connected');
   }catch(e){BACKEND=false;console.warn('[OnAnd] backend unavailable — demo mode:',e&&e.message);}
 }
-function _wtitle(){try{return W()?W().tKr:'';}catch(e){return '';}}
-function _studentRow(){return {id:UID,name:(S.user&&S.user.name)||'Student',group_label:(S.user&&S.user.group)||'',work_id:(S.user&&S.user.workId)||'',work_title:_wtitle(),hook_text:S.hook||'',quiz_passed:!!S.quizPassed,submitted:!!S.submitted,public_code:S.publicCode||null,state:S,updated_at:new Date().toISOString()};}
+function _wtitle(){try{return W()?(W().tKr+' ('+W().tEn+')'):'';}catch(e){return '';}}
+function _studentRow(){return {id:UID,name:(S.user&&S.user.name)||'Student',group_label:(S.user&&S.user.group)||'',work_id:(S.user&&S.user.workId)||'',work_title:_wtitle(),hook_text:S.hook||'',quiz_passed:!!S.quizPassed,submitted:!!S.submitted,public_code:S.publicCode||null,vimeo_url:S.vimeo||null,state:S,updated_at:new Date().toISOString()};}
 async function dbSaveStudent(){if(!backendReady()||!S.user)return;try{await sb.from('students').upsert(_studentRow());}catch(e){console.warn('[OnAnd] save',e&&e.message);}}
 function scheduleSync(){if(!backendReady())return;clearTimeout(_syncT);_syncT=setTimeout(dbSaveStudent,900);}
 async function dbBootstrapStudent(){
   if(!backendReady()||!S.user)return;
   try{
-    const {data,error}=await sb.from('students').select('state,public_code').eq('id',UID).maybeSingle();
+    const {data,error}=await sb.from('students').select('state,public_code,vimeo_url,mentor_feedback,curator_feedback,creator_score,feedback_at').eq('id',UID).maybeSingle();
     if(error)throw error;
     if(data){
       if(data.public_code&&!S.publicCode)S.publicCode=data.public_code;
       const srv=(data.state&&data.state.visited)?Object.keys(data.state.visited).length:0;
       const loc=(S.visited)?Object.keys(S.visited).length:0;
       if(data.state&&srv>loc){S=Object.assign(blank(),data.state);save();renderSteps();go(S.step||'mission');}
+      if(data.vimeo_url)S.vimeo=data.vimeo_url;
+      // 운영자가 입력한 피드백·점수(런타임 전용; state에는 저장하지 않음)
+      SERVER_FB={vimeo:data.vimeo_url||'',mentor:data.mentor_feedback||'',curator:data.curator_feedback||'',score:data.creator_score||null,at:data.feedback_at||null};
     }
     await dbSaveStudent();
   }catch(e){console.warn('[OnAnd] resume',e&&e.message);}
@@ -458,14 +469,31 @@ async function dbSaveSurvey(){if(!backendReady())return;try{await sb.from('surve
 function scheduleSurvey(){if(!backendReady())return;clearTimeout(_surveyT);_surveyT=setTimeout(()=>{dbSaveStudent();dbSaveSurvey();},900);}
 async function dbEnsurePublicCode(){if(!backendReady())return;if(!S.publicCode){S.publicCode='R'+Math.random().toString(36).slice(2,8).toUpperCase();save();}await dbSaveStudent();}
 async function dbIssueCertificate(){if(!backendReady()||!S.user)return;try{
-  await sb.from('certificates').upsert({user_id:UID,name:S.user.name,program:'Public Media Creator',exhibition:'서서울의 투명한 청소년 기계',level_n:creatorLevel().n,verify_code:vid(),issued_on:new Date().toISOString().slice(0,10),status:'valid',snapshot:{name:S.user.name,group:S.user.group,work:_wtitle(),level:creatorLevel().kr,issued:new Date().toISOString().slice(0,10)}},{onConflict:'verify_code'});
+  await sb.from('certificates').upsert({user_id:UID,name:S.user.name,program:'Public Media Creator · OnAnd Studio',exhibition:'서서울의 투명한 청소년 기계 · The Transparent | Adolescent | Machine of Western Seoul',level_n:creatorLevel().n,verify_code:vid(),issued_on:new Date().toISOString().slice(0,10),status:'valid',snapshot:{name:S.user.name,group:S.user.group,work:_wtitle(),level:creatorLevel().ko+' · '+creatorLevel().kr,issued:new Date().toISOString().slice(0,10)}},{onConflict:'verify_code'});
 }catch(e){console.warn('[OnAnd] cert',e&&e.message);}}
 async function dbAdminOverview(code){if(!backendReady())return null;try{const {data,error}=await sb.rpc('admin_overview',{p_code:code});if(error)throw error;return data;}catch(e){console.warn('[OnAnd] admin',e&&e.message);return null;}}
 async function dbSubmitReaction(code,stars,watch,tags){if(!backendReady())throw new Error('backend not configured');const {error}=await sb.rpc('submit_reaction',{p_code:code,p_stars:stars,p_watch:watch,p_tags:tags});if(error)throw error;}
 async function dbVerifyCertificate(code){if(!backendReady())return null;try{const {data,error}=await sb.rpc('verify_certificate',{p_code:code});if(error)throw error;return data;}catch(e){return null;}}
-function mapAdminRows(raw){return (raw||[]).map(r=>{const sv=(r.state&&r.state.survey)||r.survey||{},sat=sv.sat||{},self=sv.self||{};const s2=[sat.overall,sat.fun,sat.again].filter(v=>v);const visited=(r.state&&r.state.visited)||{};return {n:r.name||'—',g:r.group_label||'',w:r.work_title||'',sub:!!r.submitted,sat:s2.length?s2.reduce((a,b)=>a+b,0)/s2.length:0,comp:Math.round(Object.keys(visited).length/STEPS.length*100),self:[self.copyright||0,self.create||0,self.collab||0,self.confid||0],fav:sv.fav||'',why:(sv.favReasons||[])[0]||'',exh:(sv.exhsat||{}).exhibition||0};});}
+// 관람객 평가 페이지에서 보여줄 제출물 정보(영상 링크·작품·이름) — 공개 RPC
+async function dbGetSubmission(code){if(!backendReady())return null;try{const {data,error}=await sb.rpc('get_submission',{p_code:code});if(error)throw error;return data;}catch(e){return null;}}
+// 내 작품에 달린 관람객 반응 집계(로그인한 참여자 본인)
+async function dbMyReactions(){if(!backendReady())return null;try{const {data,error}=await sb.rpc('my_reactions');if(error)throw error;return data;}catch(e){console.warn('[OnAnd] my_reactions',e&&e.message);return null;}}
+// 운영자: 학생별 멘토·프로그램 학예사/기획자 피드백/점수/영상 링크 저장(접근코드 게이트)
+async function dbAdminSetFeedback(code,id,mentor,curator,score,vimeo){if(!backendReady())throw new Error('backend not configured');const {error}=await sb.rpc('admin_set_feedback',{p_code:code,p_id:id,p_mentor:mentor,p_curator:curator,p_score:score,p_vimeo:vimeo});if(error)throw error;}
+function mapAdminRows(raw){return (raw||[]).map(r=>{const sv=(r.state&&r.state.survey)||r.survey||{},sat=sv.sat||{},self=sv.self||{};const s2=[sat.overall,sat.fun,sat.again].filter(v=>v);const visited=(r.state&&r.state.visited)||{};return {id:r.id||null,code:r.public_code||'',vimeo:r.vimeo_url||'',mentor:r.mentor_feedback||'',curator:r.curator_feedback||'',score:r.creator_score||null,n:r.name||'—',g:r.group_label||'',w:r.work_title||'',sub:!!r.submitted,sat:s2.length?s2.reduce((a,b)=>a+b,0)/s2.length:0,comp:Math.round(Object.keys(visited).length/STEPS.length*100),self:[self.copyright||0,self.create||0,self.collab||0,self.confid||0],fav:sv.fav||'',why:(sv.favReasons||[])[0]||'',exh:(sv.exhsat||{}).exhibition||0};});}
 function esc2(s){return String(s==null?'':s).replace(/[<>&"]/g,c=>({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c]));}
+// 작품 순서·작가명·작품명은 도록 《서서울의 투명한 | 청소년 | 기계》(2026) 공식 표기를 따름
+// Order, artist names and titles follow the official catalog of the exhibition.
 const WORKS=[
+ // ─── 전시실 1 · 소장작품 컬렉션 / Gallery 1 · New Media Collection ───
+ {id:"w2",tKr:"아르고스 · 임펄스",tEn:"Argos · Impulse",aKr:"김윤철",aEn:"Yunchul Kim",
+  artKr:"과학과 예술을 연결하는 미디어 아티스트. 입자·유체·빛처럼 보이지 않는 세계를 감각적으로 보여줘요.",
+  artEn:"A media artist connecting art and science, revealing invisible worlds — particles, fluid, light — through sensory installations.",
+  dKr:"2018년 유럽입자물리연구소(CERN)의 의뢰로 만든 작품이에요. 〈아르고스〉는 41개의 가이거 뮐러 튜브로 이루어진, 우주에서 오는 뮤온 입자를 감지하는 장치예요. 입자가 검출되면 빛이 반짝이고, 그 신호가 〈임펄스〉로 전달돼 안의 액체 흐름이 달라져요. 눈에 안 보이는 우주의 사건이 빛과 액체로 드러나요.",
+  dEn:"Commissioned by CERN in 2018. Argos is a muon-particle detector made of 41 Geiger-Müller tubes. When a particle from space is detected, the tubes flash and signal Impulse, changing the liquid flowing inside. An invisible cosmic event becomes visible through light and flow.",
+  kw:["뮤온 Muon","우주 Universe","물질 Matter","키네틱 Kinetic"],
+  q:[{kr:"눈에 보이지 않는 것은 존재하지 않는 걸까요?",en:"Does something have to be visible to be real?"},
+     {kr:"우주와 내 몸, 작품이 연결되어 있다고 느낀 적 있나요?",en:"Have you ever felt connected to the universe through something small?"}]},
  {id:"w1",tKr:"테라리움",tEn:"The Terrarium",aKr:"셰자드 다우드",aEn:"Shezad Dawood",
   artKr:"영화·VR·회화·직물을 넘나들며 미래 세계를 상상하는 작가. 기후위기·해양 생태계·난민·과학·건축을 하나의 이야기로 엮어요.",
   artEn:"A London-based artist working across film, VR, painting and textiles, building fictional worlds about climate, oceans, migration and architecture.",
@@ -474,15 +502,7 @@ const WORKS=[
   kw:["기후위기 Climate","VR","미래의 바다 Future ocean","돌연변이 Mutation"],
   q:[{kr:"300년 뒤 미래를 직접 볼 수 있다면, 가장 먼저 무엇을 확인하고 싶나요?",en:"If you could visit Earth 300 years from now, what would you check first?"},
      {kr:"기후변화를 막기 위해 우리 세대가 할 수 있는 가장 작은 행동은?",en:"What is one small action our generation can take against climate change?"}]},
- {id:"w2",tKr:"아르고스 · 임펄스",tEn:"Argos · Impulse",aKr:"김윤철",aEn:"Yunchul Kim",
-  artKr:"과학과 예술을 연결하는 미디어 아티스트. 입자·유체·빛처럼 보이지 않는 세계를 감각적으로 보여줘요.",
-  artEn:"A media artist connecting art and science, revealing invisible worlds — particles, fluid, light — through sensory installations.",
-  dKr:"〈아르고스〉는 우주에서 오는 뮤온 입자를 감지하는 장치예요. 입자가 검출되면 빛이 반짝이고, 그 신호가 〈임펄스〉로 전달돼 안의 액체 흐름이 달라져요. 눈에 안 보이는 우주의 사건이 빛과 액체로 드러나요.",
-  dEn:"Argos detects muon particles from space. When detected, the tubes flash and signal Impulse, changing the liquid inside. An invisible cosmic event becomes visible through light and flow.",
-  kw:["뮤온 Muon","우주 Universe","물질 Matter","키네틱 Kinetic"],
-  q:[{kr:"눈에 보이지 않는 것은 존재하지 않는 걸까요?",en:"Does something have to be visible to be real?"},
-     {kr:"우주와 내 몸, 작품이 연결되어 있다고 느낀 적 있나요?",en:"Have you ever felt connected to the universe through something small?"}]},
- {id:"w3",tKr:"검은 태양",tEn:"Black Sun",aKr:"염지혜",aEn:"Ji Hye Yeom",
+ {id:"w3",tKr:"검은 태양",tEn:"Le Soleil Noir (Black Sun)",aKr:"염지혜",aEn:"Ji Hye Yeom",
   artKr:"영상으로 보이지 않는 힘과 관계를 탐구하는 작가. 환경·과학·전설·역사·정치가 얽히는 지점을 다뤄요.",
   artEn:"Uses video to explore invisible forces, connecting environment, science, myth, history and politics.",
   dKr:"남극의 아름다운 풍경을 보여주지만, 그 안에는 기후 변화·자원 경쟁·인간의 욕망이 숨어 있어요. 세종기지 영상과 전설, 사막 이미지를 겹쳐 ‘자연은 인간이 마음대로 다룰 수 있는 대상인가?’를 물어요.",
@@ -493,83 +513,52 @@ const WORKS=[
  {id:"w4",tKr:"아니마",tEn:"ANIMA",aKr:"로랑 그라소",aEn:"Laurent Grasso",
   artKr:"보이는 것과 보이지 않는 것, 과학과 신비의 경계를 탐구하는 작가. 당연한 현실을 낯설게 보이게 만들어요.",
   artEn:"A French artist exploring the line between visible and invisible, science and mystery — making familiar reality feel strange.",
-  dKr:"인간만이 세상을 바라보는 주체가 아니라는 생각에서 출발해요. 라이다(LiDAR)로 나무와 바위를 투명하게 통과하는 듯한 이미지를 만들어, 평소 쓰지 않던 새로운 감각을 경험하게 해요.",
-  dEn:"Begins from the idea that humans aren’t the only beings with a perspective. LiDAR makes images that seem to pass through trees and rocks, opening a new way of sensing the world.",
+  dKr:"인간만이 세상을 바라보는 주체가 아니라는 생각에서 출발해요. 라이다(LiDAR)로 나무와 바위를 투명하게 통과하는 듯한 이미지를 만들어, 여우·나무·바위의 시점을 나란히 두며 평소 쓰지 않던 새로운 감각을 경험하게 해요.",
+  dEn:"Begins from the idea that humans aren’t the only beings with a perspective. LiDAR makes images that seem to pass through trees and rocks; by placing the viewpoints of a fox, a tree and a rock side by side, it opens a new way of sensing the world.",
   kw:["비인간 Non-human","라이다 LiDAR","보이지 않는 세계 Invisible","STS"],
   q:[{kr:"기술은 우리의 눈보다 더 많은 것을 볼 수 있을까요?",en:"Can technology see more than the human eye?"},
      {kr:"세상을 만드는 건 사람뿐일까요, 자연과 사물도 함께일까요?",en:"Do only humans shape the world, or do nature and objects too?"}]},
- {id:"w5",tKr:"법칙과 예술 사이의 미끄러짐",tEn:"Slippage Between Law and Art",aKr:"아니카 이",aEn:"Anicka Yi",
+ {id:"w5",tKr:"예술과 법칙 사이의 미끄러짐",tEn:"Slippage Between Law and Art",aKr:"아니카 이",aEn:"Anicka Yi",
   artKr:"냄새·박테리아·생물·기계처럼 보통 미술 재료로 생각하지 않는 것들을 사용해, 생명과 기술의 경계를 질문해요.",
   artEn:"Uses unusual materials — smell, bacteria, organisms, machines — to question the boundary between life and technology.",
-  dKr:"금속 구조와 푸른 벌집 형태, 디지털 시계로 이루어진 작품이에요. 금속은 기술을, 벌집은 생명을 떠올리게 하고, 아래 디지털 시간은 지구와 인간에게 남은 시간을 생각하게 해요.",
-  dEn:"A metal structure, blue honeycomb forms and a digital clock. Metal suggests technology, the honeycomb suggests life, and the clock makes us think about the time left for Earth.",
+  dKr:"곤충의 집에서 영감을 받아, 금속 구조 위에 푸른 벌집 형태가 늘어진 설치 작품이에요. 금속은 기술을, 벌집은 생명을 떠올리게 하고, 아래 디지털 시계의 붉은 숫자는 지구와 인간에게 남은 시간을 생각하게 해요.",
+  dEn:"Inspired by insect architecture, blue honeycomb forms hang from a metal structure. Metal suggests technology, the honeycomb suggests life, and the red digits of a digital clock at the base make us think about the time left for Earth.",
   kw:["박테리아 Bacteria","비인간 생명 Non-human life","시간 Time","인공 자연 Artificial nature"],
   q:[{kr:"인간만 세상의 중심이라고 생각하나요?",en:"Are humans really the center of the world?"},
      {kr:"기술과 생명은 어디에서 나뉘고, 어디에서 섞일까요?",en:"Where do technology and life separate, and where do they mix?"}]},
- {id:"w6",tKr:"세 개의 숨",tEn:"Three Breaths",aKr:"조영주",aEn:"Youngjoo Cho",
-  artKr:"몸·돌봄·여성의 경험·사회적 역할을 퍼포먼스·영상·사운드로 풀어내는 작가. 개인의 경험을 사회적 질문으로 확장해요.",
-  artEn:"Works with performance, video and sound on the body, care and women’s experiences, turning the personal into social questions.",
-  dKr:"작가가 30개월 동안 쓴 육아일지에서 출발한 음악 작품이에요. 수유·수면·배변 기록이 악보처럼 바뀌고, 낮은 음역의 악기들이 숨과 돌봄의 무게를 연주해요. ‘돌본다는 건 어떤 책임인가?’를 물어요.",
-  dEn:"Music born from a 30-month childcare diary. Records of feeding and sleeping become a score, and low instruments perform the weight of breath and care. What does it mean to care?",
-  kw:["돌봄 Care","숨 Breath","모성 Motherhood","사운드 Sound"],
-  q:[{kr:"누군가를 돌본다는 것은 어떤 감정과 책임을 포함할까요?",en:"What feelings and responsibilities come with caring for someone?"},
-     {kr:"반복되는 일상 기록도 예술이 될 수 있을까요?",en:"Can everyday records become art?"}]},
- {id:"w7",tKr:"심박 신호를 이용한 과자 포장 개봉 장치…",tEn:"Heartbeat Snack Workshop",aKr:"우주+림희영",aEn:"Wooju + Limheeyoung",
-  artKr:"기계·데이터·사물·인간의 관계를 유머와 실험으로 보여주는 작가 듀오. 사회 구조의 모순을 참여형 장치로 드러내요.",
-  artEn:"An artist duo using machines, data and humor to explore relationships between humans and systems.",
-  dKr:"네 사람이 심박 센서를 차고 심장 박동을 맞춰야 작동해요. 박동이 동기화되면 과자 봉지가 내려오고 기계가 봉지를 잘라 과자를 먹을 수 있어요. 사람과 기계가 함께 호흡하는 참여형 작품이에요.",
-  dEn:"Four people wear heartbeat sensors and must sync. When synchronized, a snack bag descends and the machine cuts it open — turning human-machine interaction into a shared rhythm.",
-  kw:["심박 Heartbeat","참여 Participation","동기화 Sync","인간-기계 Human-machine"],
-  q:[{kr:"우리는 다른 사람과 심장 박동까지 맞출 수 있을까요?",en:"Can we synchronize even our heartbeats with others?"},
-     {kr:"기계와 협력하는 일은 불편할까요, 재미있을까요?",en:"Is cooperating with a machine uncomfortable or fun?"}]},
- {id:"w8",tKr:"분홍색 기계",tEn:"Pink Machine",aKr:"우주+림희영",aEn:"Wooju + Limheeyoung",
-  artKr:"일상의 사물과 기계를 결합해 이상하고 낯선 움직임을 만드는 작업을 이어 와요. 익숙한 현실 속 부조리를 드러내요.",
-  artEn:"Combine everyday objects and machines into strange movements that reveal absurdity in ordinary reality.",
-  dKr:"부드러운 분홍색 실리콘과 차가운 금속 기계가 만난 작품이에요. 실리콘 덩어리가 서로 비비고 늘어나고 튕겨지며 어색하고 기묘한 움직임을 만들어요. 기계인데도 살아 있는 것처럼 느껴져요.",
-  dEn:"Soft pink silicone meets cold metal. The silicone rubs, stretches and bounces in awkward, strange movements — a machine that feels almost alive.",
-  kw:["키네틱 Kinetic","실리콘 Silicone","기이함 Uncanny","우연한 움직임 Chance"],
-  q:[{kr:"기계도 감정이 있는 것처럼 보일 수 있을까요?",en:"Can a machine look like it has emotions?"},
-     {kr:"왜 이상한 움직임은 우리 시선을 오래 붙잡을까요?",en:"Why do strange movements catch our attention?"}]},
- {id:"w9",tKr:"Ghost (유령)",tEn:"Ghost",aKr:"양아치",aEn:"Yangachi",
-  artKr:"웹·감시·데이터·권력 구조를 비판적으로 탐구해 온 미디어 아티스트. 기술이 사회를 어떻게 조직·통제하는지 물어요.",
-  artEn:"A media artist critically exploring the web, surveillance, data and power — how technology organizes society.",
-  dKr:"플랫폼 자본주의를 하나의 거대한 운영체제(OS)처럼 바라봐요. 배달 노동·데이터·AI·카메라가 연결된 세계에서 인간의 몸과 감정은 데이터로 바뀌지만, 데이터로 잡히지 않는 감각과 목소리는 ‘유령’처럼 남아요.",
-  dEn:"Sees platform capitalism as a huge operating system. Bodies and emotions become data, yet feelings and voices that can’t be captured remain like ghosts.",
-  kw:["플랫폼 Platform","데이터 Data","노동 Labor","유령 Ghost"],
-  q:[{kr:"내가 남긴 데이터는 누구의 것이 될까요?",en:"Who owns the data I leave behind?"},
-     {kr:"기술이 포착하지 못하는 인간의 감각은 무엇일까요?",en:"What human feelings can technology not capture?"}]},
- {id:"w10",tKr:"엘리의 눈",tEn:"Ellie’s Eye",aKr:"차재민",aEn:"Jeamin Cha",
-  artKr:"촬영한 영상과 리서치로 개인의 마음·질병·돌봄·사회 구조를 탐구하는 작가. 기술이 인간을 바라보는 방식을 물어요.",
-  artEn:"Uses filmed footage and research to explore mind, illness, care and society — questioning how technology looks at us.",
-  dKr:"‘엘리’는 AI 심리상담사이자 강아지의 이름이에요. 엑스레이·스캐닝·심리 상담처럼 인간의 안을 들여다보려는 기술을 다루며, 몸은 볼 수 있어도 마음·우울까지 기술이 해결할 수 있는지 조심스레 물어요.",
-  dEn:"Ellie is both an AI counselor and a dog. The work looks at technologies that try to see inside us, asking whether technology can really understand the mind.",
-  kw:["AI 상담 AI counseling","들여다보기 Seeing","마음 Mind","돌봄 Care"],
-  q:[{kr:"AI 상담사가 나의 마음을 정말 이해할 수 있을까요?",en:"Can an AI counselor truly understand my mind?"},
-     {kr:"보는 것과 이해하는 것은 같은 일일까요?",en:"Is seeing the same as understanding?"}]},
- {id:"w11",tKr:"힐 스테이션 · 손목의 세대",tEn:"Heal Station · Generation of Wrists",aKr:"안성석",aEn:"Sungseok Ahn",
-  artKr:"사진·영상·VR·게임 엔진으로 현실과 가상을 오가며 기억·세대·사회 시스템을 탐구해요. 개인의 경험을 공적 질문으로 확장해요.",
-  artEn:"Works with photography, video, VR and game engines on memory, generations and social systems across real and virtual.",
-  dKr:"게임 속 회복 공간처럼 사람들이 모여 쉬고 함께 만드는 공간이에요. 여러 참여자가 마인크래프트로 하나의 가상 구조물을 함께 짓고, 손목과 손끝으로 세계를 움직이는 오늘의 세대를 보여줘요.",
-  dEn:"Like a healing zone in a game — a place to rest and create together. Participants build one structure in Minecraft, showing a generation that moves worlds with wrists and fingertips.",
-  kw:["마인크래프트 Minecraft","공동창작 Co-creation","게임 Gaming","세대 Generation"],
-  q:[{kr:"게임 속에서 만든 것도 진짜 창작일까요?",en:"Is something built in a game a real creation?"},
-     {kr:"우리 세대를 ‘손목의 세대’라고 부를 수 있을까요?",en:"Can our generation be called the generation of wrists?"}]},
  {id:"w12",tKr:"21°11″",tEn:"21°11″",aKr:"노경애",aEn:"Ro Kyung Ae",
   artKr:"안무가이자 미디어 퍼포먼스 작가. 몸·소리·공간·기호로 장애와 비장애, 균형과 불균형의 기준을 다시 생각하게 해요.",
   artEn:"A choreographer and media-performance artist who rethinks ability, disability, balance and imbalance through the body.",
-  dKr:"뇌성마비 장애인 퍼포머와 비장애인 퍼포머가 함께 서고·걷고·뛰고·달려요. 작가는 몸의 기울어짐과 불균형을 결핍이 아니라 고유한 리듬과 가능성으로 봐요.",
-  dEn:"Performers with cerebral palsy and non-disabled performers stand, walk and run together. The artist sees tilt and imbalance not as a lack but as unique rhythm and possibility.",
+  dKr:"뇌성마비 장애인 퍼포머와 비장애인 퍼포머가 함께 서고·걷고·뛰고·달려요. 작가는 몸의 기울어짐과 불균형을 결핍이 아니라 고유한 리듬과 가능성으로 봐요. 제목은 몸의 기울기를 뜻하는 동시에 ‘2와 1’이라는 관계의 형식을 암시해요.",
+  dEn:"Performers with cerebral palsy and non-disabled performers stand, walk and run together. The artist sees tilt and imbalance not as a lack but as unique rhythm and possibility. The title means the tilt of the body and also suggests a relation of ‘two and one’.",
   kw:["움직임 Movement","장애 Disability","균형 Balance","몸 Body"],
   q:[{kr:"‘정상적인 몸’이라는 기준은 누가 정한 걸까요?",en:"Who decides what a ‘normal body’ is?"},
      {kr:"불안정함이 아름다움이 될 수 있을까요?",en:"Can instability become beauty?"}]},
  {id:"w13",tKr:"나는 사자다",tEn:"I am a Lion",aKr:"송주원",aEn:"Joowon Song",
   artKr:"도시의 장소와 그곳에 쌓인 시간을 몸짓으로 탐구하는 안무가·댄스필름 감독. 변하는 도시 공간에 몸으로 질문을 던져요.",
   artEn:"A choreographer and dance-film director exploring urban places and layered time through movement.",
-  dKr:"성남 태평동을 배경으로 한 댄스필름이에요. 도시 개발의 역사와 한 가족 3대의 이야기가 옥상·골목·몸짓으로 이어지고, 사자 같은 몸짓은 자신과 가족, 장소를 지키려는 마음처럼 보여요.",
-  dEn:"A dance film set in Taepyeong-dong. A neighborhood’s history and three family generations unfold through rooftops and movement; the lion-like gestures suggest protecting one’s family and place.",
-  kw:["댄스필름 Dance film","도시 기억 City memory","태평동","가족 Family"],
+  dKr:"성남 태평동의 ‘20평’ 공간을 배경으로 한 댄스필름이에요. 강제 이주된 사람들이 정착한 이 동네에서, 할머니·아버지·소녀로 이어지는 3대의 이야기가 옥상·골목·몸짓으로 펼쳐지고, 사자 같은 몸짓은 자신과 가족, 장소를 지키려는 마음처럼 보여요.",
+  dEn:"A dance film set in a twenty-pyeong space in Taepyeong-dong, Seongnam — a neighborhood where people displaced by state policy settled. Three generations (grandmother, father, a young woman) unfold across rooftops and movement; the lion-like gestures suggest protecting one’s family and place.",
+  kw:["댄스필름 Dance film","도시 기억 City memory","태평동 Taepyeong-dong","가족 Family"],
   q:[{kr:"내가 사는 동네는 내 몸과 기억에 어떤 영향을 줄까요?",en:"How does my neighborhood shape my body and memory?"},
      {kr:"사람은 무엇을 지키기 위해 강해지려고 할까요?",en:"What do people try to protect by becoming strong?"}]},
+ {id:"w10",tKr:"엘리의 눈",tEn:"Ellie’s Eye",aKr:"차재민",aEn:"Jeamin Cha",
+  artKr:"촬영한 영상과 리서치로 개인의 마음·질병·돌봄·사회 구조를 탐구하는 작가. 기술이 인간을 바라보는 방식을 물어요.",
+  artEn:"Uses filmed footage and research to explore mind, illness, care and society — questioning how technology looks at us.",
+  dKr:"‘엘리’는 AI 심리상담사이자 강아지의 이름이에요. 엑스레이·벽 투시·심리 상담처럼 ‘보이지 않는 것을 보려는’ 기술을 다루며, 몸은 점점 투명하게 스캔되지만 마음·감정은 끝내 다 포착되지 않는다는 점을 조심스레 물어요.",
+  dEn:"Ellie is both an AI counselor and a dog. The work looks at technologies that try ‘to see what cannot be seen’ — X-ray, wall-penetrating vision, AI counseling — asking whether, even as the body is scanned ever more transparently, the mind can ever be fully captured.",
+  kw:["AI 상담 AI counseling","들여다보기 Seeing","마음 Mind","돌봄 Care"],
+  q:[{kr:"AI 상담사가 나의 마음을 정말 이해할 수 있을까요?",en:"Can an AI counselor truly understand my mind?"},
+     {kr:"보는 것과 이해하는 것은 같은 일일까요?",en:"Is seeing the same as understanding?"}]},
+ {id:"w6",tKr:"세 개의 숨",tEn:"Three Breaths",aKr:"조영주",aEn:"Youngjoo Cho",
+  artKr:"몸·돌봄·여성의 경험·사회적 역할을 퍼포먼스·영상·사운드로 풀어내는 작가. 개인의 경험을 사회적 질문으로 확장해요.",
+  artEn:"Works with performance, video and sound on the body, care and women’s experiences, turning the personal into social questions.",
+  dKr:"작가가 약 30개월 동안 쓴 육아일지에서 출발한 영상·사운드 설치예요. 아기의 수유·수면·배변 기록이 악보처럼 바뀌고, 베이스 클라리넷·튜바 등 낮은 음역의 관악 4중주가 숨과 돌봄의 무게를 연주해요. 탯줄을 닮은 덕트 구조물을 따라 호흡이 공간 전체를 관통해요.",
+  dEn:"A video-and-sound installation born from a 30-month childcare diary. Records of an infant’s feeding and sleeping become a score, and a low wind quartet (bass clarinet, tuba and more) performs the weight of breath and care, flowing through a duct structure shaped like an umbilical cord.",
+  kw:["돌봄 Care","숨 Breath","모성 Motherhood","사운드 Sound"],
+  q:[{kr:"누군가를 돌본다는 것은 어떤 감정과 책임을 포함할까요?",en:"What feelings and responsibilities come with caring for someone?"},
+     {kr:"반복되는 일상 기록도 예술이 될 수 있을까요?",en:"Can everyday records become art?"}]},
+ // ─── 전시실 2·3 · 유스 스튜디오 / Gallery 2·3 · Youth Studio ───
  {id:"w14",tKr:"진화된 가상 생명체",tEn:"Evolved Virtual Creatures",aKr:"칼 심스",aEn:"Karl Sims",
   artKr:"생명과학과 컴퓨터 그래픽을 바탕으로 디지털 생명과 진화를 실험한 미디어 아티스트. 컴퓨터 안에서 생명의 원리를 시뮬레이션해요.",
   artEn:"A media artist combining life science and computer graphics to experiment with digital life and evolution.",
@@ -578,15 +567,98 @@ const WORKS=[
   kw:["인공생명 Artificial life","진화 Evolution","알고리즘 Algorithm","시뮬레이션 Simulation"],
   q:[{kr:"인간이 만든 알고리즘이 인간이 예상 못 한 생명을 만들 수 있을까요?",en:"Can human-made algorithms create life we didn’t expect?"},
      {kr:"가상 생명체도 생명이라고 부를 수 있을까요?",en:"Can virtual creatures be called life?"}]},
- {id:"w15",tKr:"핑키 박스: 몸 투명 몸",tEn:"Pinky Box",aKr:"안은미",aEn:"Eun-Me Ahn",
+ {id:"w11",tKr:"손목의 세대",tEn:"The Wrist Generation",aKr:"안성석",aEn:"Sungseok Ahn",
+  artKr:"사진·영상·VR·게임 엔진으로 현실과 가상을 오가며 기억·세대·사회 시스템을 탐구해요. 개인의 경험을 공적 질문으로 확장해요.",
+  artEn:"Works with photography, video, VR and game engines on memory, generations and social systems across real and virtual.",
+  dKr:"원형으로 둘러앉은 컴퓨터 앞에서 여러 청소년이 하나의 가상 서버에 접속해, 서서울미술관과 그 주변을 마인크래프트로 함께 지어요. 온몸이 아니라 손끝과 손목의 미세한 움직임으로 세계를 만드는 오늘의 세대를 보여줘요. 각자의 입력이 모여 거대한 공동 작업의 흔적이 돼요.",
+  dEn:"Sitting at computers arranged in a circle, youth participants log into one shared server and build the Seo-Seoul Museum and its surroundings together in Minecraft. It shows today’s generation, who make worlds through the fine movements of fingertips and wrists — each input adding up into the trace of one vast collaboration.",
+  kw:["마인크래프트 Minecraft","공동창작 Co-creation","게임 Gaming","세대 Generation"],
+  q:[{kr:"게임 속에서 만든 것도 진짜 창작일까요?",en:"Is something built in a game a real creation?"},
+     {kr:"우리 세대를 ‘손목의 세대’라고 부를 수 있을까요?",en:"Can our generation be called the wrist generation?"}]},
+ {id:"w16",tKr:"힐 스테이션",tEn:"Heal Station",aKr:"안성석",aEn:"Sungseok Ahn",
+  artKr:"사진·영상·VR·게임 엔진으로 현실과 가상을 오가며 기억·세대·사회 시스템을 탐구해요. 개인의 경험을 공적 질문으로 확장해요.",
+  artEn:"Works with photography, video, VR and game engines on memory, generations and social systems across real and virtual.",
+  dKr:"〈손목의 세대〉와 함께 놓인 조각이에요. 게임 속에서 체력을 회복하는 ‘힐 존(heal zone)’처럼, 잠시 멈춰 숨을 고르고 다시 시작하는 쉼의 자리를 실제 사물로 만들었어요. 우레탄·실리콘·LED로 만든 부드러운 형태가 차가운 컴퓨터 환경 옆에서 ‘회복’이라는 감각을 떠올리게 해요.",
+  dEn:"A sculpture placed alongside The Wrist Generation. Like a ‘heal zone’ in a game where you recover your strength, it turns a place of rest — pausing, catching your breath, starting again — into a real object. Soft forms of urethane, silicone and LED bring a sense of ‘recovery’ beside the cold computer setup.",
+  kw:["회복 Healing","쉼 Rest","게임 Game","조각 Sculpture"],
+  q:[{kr:"여러분은 지치고 힘들 때 어디에서 ‘회복’하나요?",en:"Where do you go to ‘recover’ when you’re worn out?"},
+     {kr:"게임 속 회복 공간이 현실에도 있다면 어떤 모습일까요?",en:"If a game’s healing space existed in real life, what would it look like?"}]},
+ {id:"w7",tKr:"심박 신호를 이용한 과자 포장 개봉 장치 제어 워크숍",tEn:"Control of a Snack Package Opening Device Using Heart Rate Signals: a Workshop",aKr:"우주+림희영",aEn:"UJOO+LIMHEEYOUNG",
+  artKr:"키네틱 조각과 인터랙티브 장치로 사회·정치·문화에 숨은 모순과 부조리를 탐구하는 작가 듀오. 현실에 없는 개념을 ‘작동하는 기계’로 번역해요.",
+  artEn:"An artist duo working with kinetic sculpture and interactive devices to reveal the contradictions hidden in society — translating ideas that don’t exist in reality into working machines.",
+  dKr:"네 사람이 심박 센서를 차고 심호흡·명상·독서·연산으로 심장 박동을 맞춰야 작동해요. 네 명의 박동 간격이 일치하는 순간 과자 봉지가 내려오고 기계가 봉지를 잘라 과자를 먹을 수 있어요. 사람과 기계가 함께 호흡하는 참여형 작품이에요.",
+  dEn:"Four people wear heartbeat sensors and sync their pulses through deep breathing, meditation, reading and calculation. The moment all four heart-rate intervals align, a snack bag descends and the machine cuts it open — turning human-machine interaction into a shared rhythm.",
+  kw:["심박 Heartbeat","참여 Participation","동기화 Sync","인간-기계 Human-machine"],
+  q:[{kr:"우리는 다른 사람과 심장 박동까지 맞출 수 있을까요?",en:"Can we synchronize even our heartbeats with others?"},
+     {kr:"기계와 협력하는 일은 불편할까요, 재미있을까요?",en:"Is cooperating with a machine uncomfortable or fun?"}]},
+ {id:"w17",tKr:"사랑의 타워",tEn:"Love Tower",aKr:"우주+림희영",aEn:"UJOO+LIMHEEYOUNG",
+  artKr:"키네틱 조각과 인터랙티브 장치로 사회·정치·문화에 숨은 모순과 부조리를 탐구하는 작가 듀오. 현실에 없는 개념을 ‘작동하는 기계’로 번역해요.",
+  artEn:"An artist duo working with kinetic sculpture and interactive devices to reveal the contradictions hidden in society — translating ideas that don’t exist in reality into working machines.",
+  dKr:"두 작가가 2008년에 만든 초기 키네틱 조각이에요. 스테인리스 스틸과 작은 모터, 유리관, 자작나무, 기름으로 이루어져 천천히 움직여요. 기계 장치가 단순한 도구가 아니라 ‘감정’과 ‘상상’을 작동시키는 매개가 될 수 있다는, 이들 작업의 출발점을 보여주는 작품이에요.",
+  dEn:"An early kinetic sculpture the duo made in 2008. Built from stainless steel, small motors, glass tubes, white birch and oil, it moves slowly. It shows the starting point of their practice — the idea that a machine can be not just a tool but a device that sets emotion and imagination in motion.",
+  kw:["키네틱 Kinetic","초기작 Early work","기계와 감정 Machine & emotion","움직임 Movement"],
+  q:[{kr:"기계가 ‘사랑’ 같은 감정을 표현할 수 있을까요?",en:"Can a machine express a feeling like ‘love’?"},
+     {kr:"오래된 기계 작품에서 우리는 무엇을 느낄 수 있을까요?",en:"What can we feel from an older machine artwork?"}]},
+ {id:"w8",tKr:"분홍색 기계",tEn:"Machine with Pink",aKr:"우주+림희영",aEn:"UJOO+LIMHEEYOUNG",
+  artKr:"일상의 사물과 기계를 결합해 이상하고 낯선 움직임을 만드는 작업을 이어 와요. 익숙한 현실 속 부조리를 드러내요.",
+  artEn:"Combine everyday objects and machines into strange movements that reveal absurdity in ordinary reality.",
+  dKr:"부드러운 분홍색 실리콘과 차가운 금속 기계가 만난 작품이에요. 실리콘 덩어리가 서로 비비고 늘어나고 튕겨지며 어색하고 기묘한 움직임을 만들어요. 기계인데도 살아 있는 것처럼 느껴져요.",
+  dEn:"Soft pink silicone meets cold metal. The silicone rubs, stretches and bounces in awkward, strange movements — a machine that feels almost alive.",
+  kw:["키네틱 Kinetic","실리콘 Silicone","기이함 Uncanny","우연한 움직임 Chance"],
+  q:[{kr:"기계도 감정이 있는 것처럼 보일 수 있을까요?",en:"Can a machine look like it has emotions?"},
+     {kr:"왜 이상한 움직임은 우리 시선을 오래 붙잡을까요?",en:"Why do strange movements catch our attention?"}]},
+ {id:"w9",tKr:"Ghost(유령)",tEn:"Ghost",aKr:"양아치",aEn:"Yangachi",
+  artKr:"웹·감시·데이터·권력 구조를 비판적으로 탐구해 온 미디어 아티스트. 기술이 사회를 어떻게 조직·통제하는지 물어요.",
+  artEn:"A media artist critically exploring the web, surveillance, data and power — how technology organizes society.",
+  dKr:"플랫폼 자본주의를 하나의 거대한 운영체제(OS)처럼 바라봐요. 배달 노동·데이터·AI·카메라가 연결된 세계에서 인간의 몸과 감정은 데이터로 바뀌지만, 데이터로 잡히지 않는 감각과 목소리는 ‘유령’처럼 남아요. (7월 팝업 워크숍에서는 음성사서함으로 다양한 목소리가 호출돼요.)",
+  dEn:"Sees platform capitalism as a huge operating system. Bodies and emotions become data, yet feelings and voices that can’t be captured remain like ghosts. (In a July pop-up workshop, many voices are summoned through a voicemail box.)",
+  kw:["플랫폼 Platform","데이터 Data","노동 Labor","유령 Ghost"],
+  q:[{kr:"내가 남긴 데이터는 누구의 것이 될까요?",en:"Who owns the data I leave behind?"},
+     {kr:"기술이 포착하지 못하는 인간의 감각은 무엇일까요?",en:"What human feelings can technology not capture?"}]},
+ {id:"w18",tKr:"한글세대를 위한 [ ]",tEn:"For the Hangeul Generation",aKr:"최수련",aEn:"Sooryeon Choe",
+  artKr:"동북아시아의 신화·설화와, 오늘날 왜곡되어 떠도는 ‘동양풍’ 이미지를 바탕으로 전통이 어떻게 변형·재현되는지 탐구하는 작가. 저해상도 이미지와 번역된 언어처럼 ‘불완전한 매개’로 의미가 끊임없이 어긋나는 상태를 보여줘요.",
+  artEn:"An artist exploring how tradition is transformed and reproduced, working from Northeast Asian myths and the ‘orientalist’ images that circulate today. She uses ‘imperfect vehicles of meaning’ — low-res images, translated language — to show how meaning keeps slipping.",
+  dKr:"관객이 직접 참여해 완성하는 작품이에요. 중국 청대 괴담 소설을 바탕으로, 파자술사를 찾아가듯 한자를 고른 뒤 그에 해당하는 설화를 자기만의 방식으로 번역하고 은색 벽에 베껴 적어요. 번역과 필사라는 느린 몸의 행위를 통해, 같은 이야기도 사람마다 다르게 쌓여가요. 번역은 일종의 ‘코드 변환’, 필사는 ‘몸으로 하는 기록’이에요.",
+  dEn:"A work the audience completes by taking part. Based on Qing-dynasty Chinese ghost tales, you pick a Chinese character as if visiting a fortune teller, translate the matching folk tale in your own way, and transcribe it onto a silver wall. Through the slow, bodily acts of translating and copying, the same story stacks up differently for each person — translation as ‘code conversion,’ transcription as ‘recording with the body.’",
+  kw:["번역 Translation","필사 Transcription","설화 Folk tale","참여 Participation"],
+  q:[{kr:"같은 글을 사람마다 다르게 번역하는 건 틀린 걸까요, 다른 걸까요?",en:"When people translate the same text differently — is that wrong, or just different?"},
+     {kr:"손으로 직접 베껴 쓸 때 우리 몸은 무엇을 기억하게 될까요?",en:"What does our body remember when we copy something out by hand?"}]},
+ {id:"w19",tKr:"광서귀사",tEn:"Two Ghost Masters",aKr:"최수련",aEn:"Sooryeon Choe",
+  artKr:"동북아시아의 신화·설화와, 오늘날 왜곡되어 떠도는 ‘동양풍’ 이미지를 바탕으로 전통이 어떻게 변형·재현되는지 탐구하는 작가. 저해상도 이미지와 번역된 언어처럼 ‘불완전한 매개’로 의미가 끊임없이 어긋나는 상태를 보여줘요.",
+  artEn:"An artist exploring how tradition is transformed and reproduced, working from Northeast Asian myths and the ‘orientalist’ images that circulate today. She uses ‘imperfect vehicles of meaning’ — low-res images, translated language — to show how meaning keeps slipping.",
+  dKr:"리넨 위에 수채·유채와 은색 먹으로 그린 그림이에요. 작가가 오래된 동아시아의 귀신·설화 이미지를 끌어와, 또렷하게 설명되지 않는 신비롭고 낯선 장면을 만들어요. 은색 먹은 빛에 따라 다르게 보여서, 보는 각도와 시간에 따라 그림이 달라져요.",
+  dEn:"A painting in watercolor, oil and silver ink on linen. Choe draws on old East Asian ghost and folk-tale imagery to build a mysterious, unfamiliar scene that resists clear explanation. The silver ink shifts with the light, so the picture changes with your angle and the time of day.",
+  kw:["귀신 Ghost","설화 Folk tale","회화 Painting","은색 먹 Silver ink"],
+  q:[{kr:"무서운 이야기나 귀신 이야기는 왜 시대를 넘어 계속 전해질까요?",en:"Why do ghost stories keep being passed down across generations?"},
+     {kr:"또렷하게 설명되지 않는 그림이 주는 매력은 무엇일까요?",en:"What’s the appeal of a picture that isn’t fully explained?"}]},
+ {id:"w20",tKr:"잡화총총",tEn:"Various Flowers Covered in Shadow",aKr:"최수련",aEn:"Sooryeon Choe",
+  artKr:"동북아시아의 신화·설화와, 오늘날 왜곡되어 떠도는 ‘동양풍’ 이미지를 바탕으로 전통이 어떻게 변형·재현되는지 탐구하는 작가. 저해상도 이미지와 번역된 언어처럼 ‘불완전한 매개’로 의미가 끊임없이 어긋나는 상태를 보여줘요.",
+  artEn:"An artist exploring how tradition is transformed and reproduced, working from Northeast Asian myths and the ‘orientalist’ images that circulate today. She uses ‘imperfect vehicles of meaning’ — low-res images, translated language — to show how meaning keeps slipping.",
+  dKr:"리넨 위에 수채·유채·은색 먹으로 그린 그림이에요. 여러 사물과 꽃, 무늬가 그림자처럼 겹쳐 빼곡히 들어차 있어요. 분명히 보이는 것과 어렴풋이 가려진 것이 함께 있어서, 익숙한 ‘동양풍’ 이미지가 묘하게 낯설게 느껴져요.",
+  dEn:"A painting in watercolor, oil and silver ink on linen, densely filled with objects, flowers and patterns that overlap like shadows. Clearly visible things sit beside half-hidden ones, making a familiar ‘oriental’ image feel strangely unfamiliar.",
+  kw:["그림자 Shadow","겹침 Layering","회화 Painting","동양풍 Orientalism"],
+  q:[{kr:"빼곡히 채워진 그림에서 내 눈은 어디에 가장 먼저 머무르나요?",en:"In a densely packed picture, where does your eye land first?"},
+     {kr:"‘전통적’이라고 느끼는 이미지는 정말 옛것일까요, 만들어진 걸까요?",en:"Is an image we call ‘traditional’ really old — or is it made up?"}]},
+ {id:"w21",tKr:"봉두난발 귀신과 여섯 번째 딸",tEn:"A Disheveled Ghost and the Sixth Daughter",aKr:"최수련",aEn:"Sooryeon Choe",
+  artKr:"동북아시아의 신화·설화와, 오늘날 왜곡되어 떠도는 ‘동양풍’ 이미지를 바탕으로 전통이 어떻게 변형·재현되는지 탐구하는 작가. 저해상도 이미지와 번역된 언어처럼 ‘불완전한 매개’로 의미가 끊임없이 어긋나는 상태를 보여줘요.",
+  artEn:"An artist exploring how tradition is transformed and reproduced, working from Northeast Asian myths and the ‘orientalist’ images that circulate today. She uses ‘imperfect vehicles of meaning’ — low-res images, translated language — to show how meaning keeps slipping.",
+  dKr:"리넨 위에 수채·유채로 그린 그림이에요. 머리를 풀어헤친 귀신과 ‘여섯 번째 딸’이라는 설화 속 인물이 함께 등장해요. 옛이야기 속 존재들을 오늘의 그림으로 불러내, 산 자와 죽은 자, 인간과 비인간 사이를 오가는 낯선 장면을 보여줘요.",
+  dEn:"A painting in watercolor and oil on linen. A wild-haired ghost and a folk-tale figure, the ‘sixth daughter,’ appear together. Calling beings from old stories into a present-day painting, it shows an uncanny scene moving between the living and the dead, the human and the nonhuman.",
+  kw:["귀신 Ghost","설화 Folk tale","회화 Painting","경계 Boundary"],
+  q:[{kr:"옛이야기 속 인물을 지금 다시 그리면 어떤 새로운 의미가 생길까요?",en:"What new meaning appears when we re-paint a figure from an old story today?"},
+     {kr:"‘귀신’은 무엇을 대신 말해 주는 존재일까요?",en:"What might a ‘ghost’ be speaking on behalf of?"}]},
+ {id:"w15",tKr:"핑크 박스: 몸 투명 몸",tEn:"Pink Box: bodies transparent",aKr:"안은미",aEn:"Eun-me Ahn",
   artKr:"한국을 대표하는 안무가. 할머니·청소년·아저씨 등 다양한 사람의 몸짓을 무대로 가져와, 춤이 모두의 언어임을 보여줘요.",
   artEn:"A leading Korean choreographer who brings everyone’s movements onto the stage, showing dance is a language for all.",
-  dKr:"안은미의 2012년 안무작 〈사심 없는 땐쓰〉의 기록을 오늘의 전시장으로 다시 가져온 작품이에요. 거울 조각과 센서로 내 몸을 여러 각도로 보고, 과거와 현재의 청소년 춤을 겹쳐 경험해요.",
-  dEn:"Brings documentation of Ahn’s 2012 dance back into today’s gallery. Through mirrors and sensors you see your body from many angles, layering past and present teen dances.",
+  dKr:"안은미의 2012년 안무작 〈사심 없는 땐쓰〉의 기록을 오늘의 전시장으로 다시 가져와 확장·재구성한 작품이에요. 거울 구조와 영상·빛 속에서 2012년 청소년의 춤이 지금 관람자의 몸과 겹쳐지고, 과거와 현재의 청소년 춤을 함께 경험해요. (연계 워크숍 〈사심 없는 땐쓰〉가 이 공간에서 열려요.)",
+  dEn:"An expanded, reconstructed version of Ahn’s 2012 piece Dancing Teen Teen, brought back into today’s gallery. Amid mirrors, video and light, the dances of teenagers from 2012 overlap with present-day visitors’ bodies, letting you experience past and present teen dance at once. (The Dancing Teen Teen workshop takes place in this space.)",
   kw:["춤 Dance","청소년 Teenagers","몸의 언어 Body language","워크숍 Workshop"],
   q:[{kr:"춤은 잘 추는 사람만 할 수 있는 걸까요?",en:"Is dance only for people who are good at it?"},
      {kr:"내 몸은 어떤 방식으로 나를 표현하고 있나요?",en:"How does my body express who I am?"}]},
 ];
+// 제작연도 — 도록 작품 캡션에서 추출 / Production year — extracted from the catalog captions
+const WORK_YEARS={w1:"2020",w2:"2018",w3:"2019",w4:"2022",w5:"2022",w6:"2020",w7:"2026",w8:"2019",w9:"2026",w10:"2020",w11:"2026",w12:"2018/2020",w13:"2019 (2023 재제작 · remade 2023)",w14:"1994",w15:"2026",w16:"2026",w17:"2008",w18:"2026",w19:"2024",w20:"2025",w21:"2025"};
+WORKS.forEach(w=>{w.year=WORK_YEARS[w.id]||"";});
 
 const STEPS=[
  {id:"mission",kr:"미션",en:"Mission"},
@@ -619,7 +691,7 @@ function W(){return WORKS.find(w=>w.id===S.user.workId)||WORKS[0]}
 function toast(kr,en){const t=document.getElementById('toast');t.innerHTML=kr+(en?'<span class="en">'+en+'</span>':'');t.classList.add('show');clearTimeout(t._t);t._t=setTimeout(()=>t.classList.remove('show'),2400)}
 
 const wsel=document.getElementById('in-work');
-WORKS.forEach(w=>{const o=document.createElement('option');o.value=w.id;o.textContent=w.tKr+" · "+w.aKr;wsel.appendChild(o)});
+WORKS.forEach(w=>{const o=document.createElement('option');o.value=w.id;o.textContent=w.tKr+" ("+w.tEn+") · "+w.aKr+" ("+w.aEn+")";wsel.appendChild(o)});
 let editMode=false;
 document.getElementById('startBtn').addEventListener('click',()=>{
   const u={name:(document.getElementById('in-name').value.trim()||"Student"),group:document.getElementById('in-group').value,workId:document.getElementById('in-work').value};
@@ -675,6 +747,7 @@ function go(id){
   if(id==="checklist")initChecklist();
   if(id==="submit")initSubmit();
   if(id==="survey")initSurvey();
+  if(id==="feedback")initFeedback();
   if(id==="report")initReport();
   if(id==="artwork"){const rb=document.getElementById('reselect');if(rb)rb.addEventListener('click',reopenSelection);}
   bindNav();
@@ -723,12 +796,24 @@ function _pubBox(inner){let p=document.getElementById('pub');if(!p){p=document.c
   p.style.cssText='min-height:100vh;display:flex;align-items:center;justify-content:center;padding:22px;background:var(--paper)';
   p.innerHTML='<div style="width:100%;max-width:460px">'+inner+'</div>';return p;}
 function _pubThanks(p,demo){p.querySelector('.card').innerHTML='<div class="brandrow" style="margin-bottom:10px"><span class="logomark"></span>OnAnd Studio</div><h2 style="font-size:21px;color:var(--navy);margin:0 0 6px">고마워요!<span class="en" style="display:block;font-size:13px;color:var(--muted);font-weight:400">Thank you — your reaction was recorded.</span></h2><p class="bodytext" style="font-size:12.5px">여러분의 반응이 학생 크리에이터의 성장에 큰 힘이 돼요.'+(demo?' <span style="color:var(--amberd)">(데모 모드 · 백엔드 미연결)</span>':'')+'</p>';}
-function renderPublicReaction(code){
+async function renderPublicReaction(code){
   let stars=0; const tags={};
+  const sub=await dbGetSubmission(code);
+  const vurl=sub&&sub.vimeo_url?sub.vimeo_url:'';
+  const subInfo=sub?('<p class="bodytext" style="font-size:12px;color:var(--muted);margin:0 0 10px">'+esc2(sub.work_title||'')+(sub.name?' · '+esc2(sub.name):'')+'</p>'):'';
+  const videoEmbed=(function(){
+    if(!vurl)return '';
+    const frame=(src)=>'<div style="position:relative;padding-top:56.25%;border-radius:12px;overflow:hidden;margin:0 0 14px;background:#000"><iframe src="'+src+'" style="position:absolute;top:0;left:0;width:100%;height:100%;border:0" allow="autoplay; fullscreen; picture-in-picture; encrypted-media" allowfullscreen></iframe></div>';
+    let m;
+    if(m=vurl.match(/vimeo\.com\/(?:video\/)?(\d+)/))return frame('https://player.vimeo.com/video/'+m[1]);
+    if(m=vurl.match(/(?:youtube\.com\/(?:watch\?(?:.*&)?v=|shorts\/|embed\/|live\/)|youtu\.be\/)([A-Za-z0-9_-]{6,})/))return frame('https://www.youtube.com/embed/'+m[1]);
+    return '<a class="btn go" href="'+esc2(vurl)+'" target="_blank" rel="noopener" style="width:100%;justify-content:center;margin:0 0 14px">▶ 영상 먼저 보기 · Watch the video</a>';
+  })();
   const TAGS=[['easy','가장 이해하기 쉬웠어요 · Easiest to understand'],['fun','재미있어요 · Fun'],['share','친구에게 공유하고 싶어요 · Want to share'],['live','직접 보고 싶어요 · Want to see it live']];
   const p=_pubBox('<div class="card" style="margin:0">'+
     '<div class="brandrow" style="margin-bottom:10px"><span class="logomark"></span>OnAnd Studio</div>'+
     '<h2 style="font-size:21px;color:var(--navy);margin:0 0 4px;letter-spacing:-0.02em">이 영상 어땠나요?<span class="en" style="display:block;font-size:13px;color:var(--muted);font-weight:400">How was this creator’s video?</span></h2>'+
+    subInfo+videoEmbed+
     '<p class="bodytext" style="font-size:12.5px;margin:8px 0 12px">전시장에서 본 학생 크리에이터의 영상을 익명으로 평가해 주세요.<span class="en" style="font-style:italic"> Rate this student creator’s video anonymously.</span></p>'+
     '<div id="prStars" style="font-size:34px;letter-spacing:6px;cursor:pointer;user-select:none"></div>'+
     '<div class="chips" id="prTags" style="margin-top:14px">'+TAGS.map(t=>'<span class="chip" data-k="'+t[0]+'" style="cursor:pointer">'+t[1]+'</span>').join('')+'</div>'+
@@ -792,7 +877,7 @@ const CHECK=[
  {g:"촬영 · Filming",items:[["작품 클립은 1개당 3초 이내로 찍었어요","Each artwork clip is 3 sec or less"],["작품을 과장 없이 정직하게 프레이밍했어요","Framed honestly, no misleading angles"],["다른 관람객의 얼굴은 찍지 않았어요","No other visitors’ faces"]]},
  {g:"편집 · Editing",items:[["작품 클립에 필터·효과·반전·속도조절을 넣지 않았어요","No filters / effects / reverse / speed on artwork clips"],["작품 위에 자막·스티커를 덧입히지 않았어요","No overlays on the artwork"],["영상의 주인공은 나의 해설·창작이에요","My narration & creation lead the video"]]},
  {g:"저작권·크레딧 · Copyright & credit",items:[["작가명 · 〈작품명〉 · 연도를 표기했어요","Credited artist · title · year"],["음악은 저작권 프리/플랫폼 제공만 썼어요","Used only copyright-free music"],["인터넷 이미지·영상을 무단 사용하지 않았어요","No unauthorized internet media"]]},
- {g:"업로드 · Upload",items:[["파일명을 규칙대로 바꿨어요","Renamed by the rule"],["세로 9:16 · 30–60초로 만들었어요","Vertical 9:16 · 30–60 sec"],["학예사·선생님 검수를 받았어요","Got curator / teacher review"]]},
+ {g:"업로드 · Upload",items:[["파일명을 규칙대로 바꿨어요","Renamed by the rule"],["세로 9:16 · 30–60초로 만들었어요","Vertical 9:16 · 30–60 sec"],["프로그램 학예사/기획자 검수를 받았어요","Got program curator/planner review"]]},
 ];
 const SAT=[
  {k:"overall",kr:"전체 만족도",en:"Overall satisfaction",lo:"아쉬워요 Poor",hi:"최고예요 Great"},
@@ -840,7 +925,7 @@ const PANELS={
   </div>
   <div class="card"><h3>크리에이터 레벨<span class="en">Creator levels · level up as you go</span></h3>
     <p class="bodytext" style="font-size:13px;margin-top:8px">단계를 완성할수록 레벨이 올라가요. 마지막엔 <b>Master Creator</b> 배지와 나만의 리포트를 받아요.<span class="en" style="display:block;font-style:italic;color:var(--muted)">Complete steps to level up — finish to earn the Master Creator badge and your own report.</span></p>
-    <div class="chips" style="margin-top:12px">${LEVELS.map(l=>`<span class="chip" style="background:#16243F;color:#fff;border-color:#16243F">Lv.${l.n} ${l.kr}</span>`).join("")}</div>
+    <div class="chips" style="margin-top:12px">${LEVELS.map(l=>`<span class="chip" style="background:#16243F;color:#fff;border-color:#16243F">Lv.${l.n} ${l.ko} · ${l.kr}</span>`).join("")}</div>
   </div>
   ${navHTML(null,"artwork","작품 이해","Artwork")}`;},
  artwork(){const w=W();return `
@@ -862,7 +947,7 @@ const PANELS={
   <div class="card"><h3>작가는 이런 사람이에요<span class="en">About the artist</span></h3>
     <p class="bodytext">${w.artKr}</p><p class="bodytext en">${w.artEn}</p></div>
   <div class="card"><h3>해설할 때 꼭 밝혀요<span class="en">Always say in my docent</span></h3>
-    <div class="fname" style="background:#f6f3ec;border:1px solid var(--line);color:#2c3742">${w.aKr} · 〈${w.tKr}〉 · 제작연도 Year</div>
+    <div class="fname" style="background:#f6f3ec;border:1px solid var(--line);color:#2c3742">${w.aKr} (${w.aEn}) · 〈${w.tKr}〉 〈${w.tEn}〉 · ${w.year}</div>
     <p class="bodytext" style="font-size:12.5px;color:var(--muted);margin-top:8px">작가명 · 작품명 · 연도는 영상과 캡션에 반드시 넣어요 (성명표시권).<span class="en" style="display:block;font-style:italic">Always include artist · title · year in the video and caption (attribution right).</span></p></div>
   ${navHTML("artwork","copyright","저작권 교육","Copyright")}`;},
 
@@ -904,9 +989,9 @@ const PANELS={
     <div class="sh"><b>3초의 법칙</b><span class="e">The 3-second method — 1 clip = 3 sec max</span></div>
     <div class="film">
       <div class="cell art"><span class="sec">3s</span><span class="lab">작품 · 전체샷 Wide</span></div>
-      <div class="cell mine"><span class="sec">내 컷</span><span class="lab">내레이션 Narration</span></div>
+      <div class="cell mine"><span class="sec">내 컷 My</span><span class="lab">내레이션 Narration</span></div>
       <div class="cell art"><span class="sec">3s</span><span class="lab">작품 · 디테일 Detail</span></div>
-      <div class="cell mine"><span class="sec">내 컷</span><span class="lab">리액션 Reaction</span></div>
+      <div class="cell mine"><span class="sec">내 컷 My</span><span class="lab">리액션 Reaction</span></div>
       <div class="cell art"><span class="sec">3s</span><span class="lab">작품 · 움직임 Motion</span></div>
     </div>
     <div class="note">작품 3초 클립을 3~5개 모아 내 컷 사이에 끼워 넣으면, 작품은 그대로인데 영상은 리드미컬해져요.<span class="e">Collect 3–5 different 3-sec clips and intercut them with my own shots.</span></div>
@@ -935,9 +1020,9 @@ const PANELS={
     <p class="bodytext" style="font-size:13px;margin-top:8px">관람객은 3초 안에 ‘볼지 말지’ 정해요. 스크롤을 멈추게 할 첫 문장을 적어 보세요.<span class="en" style="display:block;font-style:italic;color:#5b9a90">Viewers decide in 3 seconds — write the line that stops the scroll.</span></p>
     <textarea class="ta" id="hookText" placeholder="예: 이 작품이 사실 300년 후의 서울이라면? / e.g. What if this artwork is actually Seoul 300 years from now?"></textarea>
     <div class="chips" style="margin-top:10px">
-      <span class="chip" style="background:#fff;border-color:#cfe7e0">“천재가 만들었을까, 미친 사람이 만들었을까?”</span>
-      <span class="chip" style="background:#fff;border-color:#cfe7e0">“외계인이 지구를 먹는다면?”</span>
-      <span class="chip" style="background:#fff;border-color:#cfe7e0">“3초 만에 소름 돋는 작품 보여줄게요”</span>
+      <span class="chip" style="background:#fff;border-color:#cfe7e0">“천재가 만들었을까, 미친 사람이 만들었을까?” · “Made by a genius — or a madman?”</span>
+      <span class="chip" style="background:#fff;border-color:#cfe7e0">“외계인이 지구를 먹는다면?” · “What if aliens ate the Earth?”</span>
+      <span class="chip" style="background:#fff;border-color:#cfe7e0">“3초 만에 소름 돋는 작품 보여줄게요” · “I’ll give you goosebumps in 3 seconds”</span>
     </div></div>
   <div class="card"><h3>스토리보드<span class="en">Storyboard · artwork 3 sec ↔ my shot</span></h3><div id="sbWrap"></div>
     <button class="addrow" id="sbAdd">+ 컷 추가 · Add a shot</button>
@@ -973,7 +1058,7 @@ const PANELS={
       <ol><li>세로 9:16 · 30–60초로 내보내기<span class="en"> / Export vertical 9:16, 30–60 sec</span></li>
         <li>위 규칙대로 파일명 변경<span class="en"> / Rename by the rule</span></li>
         <li>버튼 또는 QR로 폴더 열고 업로드<span class="en"> / Open via button or QR, then upload</span></li>
-        <li>학예사·선생님 검수 후 게시<span class="en"> / Publish only after review</span></li></ol>
+        <li>프로그램 학예사/기획자 검수 후 게시<span class="en"> / Publish only after program curator/planner review</span></li></ol>
       <a class="btn amber" href="${UPLOAD_URL}" target="_blank" rel="noopener" style="margin-top:16px">업로드 폴더 열기 <span class="en">Open folder</span> →</a></div>
     <div class="qrbox"><img src="${QR}" alt="Upload QR"><div class="cap">휴대폰으로 스캔<span class="en">Scan with phone</span></div></div>
   </div>
@@ -986,7 +1071,7 @@ const PANELS={
   <div class="statusrow ${S.submitted?'done':'wait'}" id="subStat">
     <div class="ico" id="subIco">${S.submitted?'✓':'…'}</div>
     <div class="st"><b id="subT">${S.submitted?'제출 완료 · Submitted':'제출 대기 · Not submitted yet'}</b>
-      <div id="subSub">${S.submitted?'학예사·멘토 검수가 시작돼요. Review begins.':'업로드 후 아래 버튼을 눌러 주세요. Press the button after uploading.'}</div></div>
+      <div id="subSub">${S.submitted?'프로그램 학예사/기획자·멘토 검수가 시작돼요. Review begins.':'업로드 후 아래 버튼을 눌러 주세요. Press the button after uploading.'}</div></div>
   </div>
   <div style="margin-top:18px;display:flex;gap:12px;flex-wrap:wrap">
     <button class="btn ${S.submitted?'ghost':'go'}" id="submitBtn">${S.submitted?'제출 취소 · Undo':'제출 완료로 표시하기 · Mark as submitted'}</button>
@@ -1002,33 +1087,20 @@ const PANELS={
     <div class="st"><b>${done?'검수·채점 진행 중 · Scoring in progress':'제출 전 · Submit first'}</b>
       <div>${done?'보통 하루 안에 점수와 반응이 도착해요. Usually within a day.':'먼저 제출 단계에서 제출을 완료해 주세요. Submit first.'}</div></div></div>
   ${done?`
-  <div class="card" style="background:var(--navy);color:#fff;border:0">
-    <h3 style="color:#fff">ONAND Creator Score<span class="en" style="color:#aebacb">How your video scored</span></h3>
-    <div style="margin-top:12px">${SC.map(s=>`<div style="display:flex;align-items:center;justify-content:space-between;padding:9px 0;border-top:1px solid rgba(255,255,255,.1)">
-      <span style="font-family:var(--mono);font-size:13px;color:#e7edf4">${s[0]}</span>
-      <span style="color:var(--amber);font-size:16px;letter-spacing:2px">${stars(s[1])}</span></div>`).join("")}</div>
-    <p class="bodytext" style="color:#aebacb;font-style:italic;font-size:12px;margin-top:12px">HOOK·Story·Visual·Emotion·Easy 5가지로 평가해요. 다음엔 Story를 한 컷 더!</p>
+  <div class="card" style="border-color:#cfe7e0;background:#f3faf8">
+    <h3>내 영상 링크 (Vimeo / YouTube)<span class="en">My published video link</span></h3>
+    <p class="bodytext" style="font-size:12.5px;margin-top:6px">전시장에 거는 ‘관람객 평가’ QR이 이 영상으로 연결돼요. 게시된 Vimeo 또는 YouTube 주소를 붙여넣어 주세요.<span class="en" style="display:block;font-style:italic">The gallery rating QR links to this video — paste your published Vimeo or YouTube URL.</span></p>
+    <input class="ta" id="vimeoInput" style="min-height:auto" placeholder="https://vimeo.com/… 또는 https://youtu.be/…" value="${esc(S.vimeo||'')}">
+    <div style="margin-top:10px;display:flex;align-items:center;gap:10px"><button class="btn go" id="vimeoSave">링크 저장 <span class="en">Save link</span></button><span id="vimeoMsg" class="bodytext" style="font-size:11.5px;color:var(--teald)"></span></div>
   </div>
+  <div id="fbScore"></div>
   <div class="card"><h3>관람객 반응<span class="en">Audience reactions · from the gallery QR</span></h3>
-    <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-top:8px">
-      <div style="font-size:26px;color:var(--amber);letter-spacing:2px">★★★★★<span style="font-size:13px;color:var(--muted);letter-spacing:0"> 4.8/5</span></div>
-      <div style="font-family:var(--mono);font-size:12px;color:var(--muted)">관람객 32명 응답 · 32 responses</div>
-    </div>
-    <div class="chips" style="margin-top:14px">
-      <span class="chip"><b style="font-family:var(--mono);color:var(--amberd)">21</b> 재미있어요 · Fun</span>
-      <span class="chip"><b style="font-family:var(--mono);color:var(--amberd)">18</b> 가장 이해하기 쉬웠어요 · Easiest to understand</span>
-      <span class="chip"><b style="font-family:var(--mono);color:var(--amberd)">12</b> 직접 보고 싶어요 · Want to see it live</span>
-      <span class="chip"><b style="font-family:var(--mono);color:var(--amberd)">9</b> 친구에게 공유했어요 · Shared it</span>
-    </div>
-    <p class="bodytext" style="font-size:12px;color:var(--muted);margin-top:12px">관람객이 전시장 QR로 남긴 반응이에요. 교수보다 진짜 관객의 반응이 진짜 점수예요.<span class="en" style="display:block;font-style:italic">Left via the gallery QR — real audience response is the real score.</span></p>
+    <div id="fbReact"><p class="bodytext" style="font-size:12.5px;color:var(--muted);margin:6px 0 0">반응을 불러오는 중… · Loading…</p></div>
+    <p class="bodytext" style="font-size:12px;color:var(--muted);margin-top:12px">관람객이 전시장 QR로 남긴 실제 반응이에요. 진짜 관객의 반응이 진짜 점수예요.<span class="en" style="display:block;font-style:italic">Real responses left via the gallery QR — the real audience response is the real score.</span></p>
   </div>
-  <div class="fb"><div class="who"><div class="av" style="background:var(--teal)">J</div><div><b>Jacob · 멘토 Mentor</b><br><span>Brown University · fresh perspective</span></div></div>
-    <p>“작품을 직접 만지지 않고도 나의 해설로 작품을 다시 보게 만든 점이 좋아요. 3초 디테일 컷을 하나 더 넣으면 리듬이 더 살겠어요!”<span class="en">Loved how your own narration makes us re-see the work without touching it. Add one more 3-sec detail clip for rhythm!</span></p>
-    <div class="tagrow"><span class="fbtag">신선한 시선 fresh</span><span class="fbtag">3초 컷 +1</span></div></div>
-  <div class="fb"><div class="who"><div class="av" style="background:var(--navy)">S</div><div><b>학예사 · Curator (SeMA)</b><br><span>copyright & credit check</span></div></div>
-    <p>“크레딧(작가·제목·연도) 표기가 정확해요. 작품 클립에 효과가 들어가지 않았는지 한 번만 더 확인해 주세요.”<span class="en">Your credit (artist · title · year) is accurate. Please double-check there are no effects on the artwork clips.</span></p>
-    <div class="tagrow"><span class="fbtag">크레딧 OK</span><span class="fbtag">효과 재확인 re-check</span></div></div>`:`
-  <div class="card"><p class="bodytext" style="margin:0">아직 점수가 없어요. 제출이 끝나면 Creator Score와 관람객 반응, 멘토·학예사 코멘트가 여기에 표시됩니다.<span class="en" style="display:block;font-style:italic;margin-top:4px">No score yet. After you submit, your Creator Score, audience reactions, and mentor/curator comments appear here.</span></p></div>`}
+  <div id="fbMentor"></div>
+  <div id="fbCurator"></div>`:`
+  <div class="card"><p class="bodytext" style="margin:0">아직 점수가 없어요. 제출이 끝나면 Creator Score와 관람객 반응, 멘토·프로그램 학예사/기획자 코멘트가 여기에 표시됩니다.<span class="en" style="display:block;font-style:italic;margin-top:4px">No score yet. After you submit, your Creator Score, audience reactions, and mentor and program-curator/planner comments appear here.</span></p></div>`}
   ${navHTML("submit","survey","성찰·만족도","Reflection")}`;},
 
  survey(){return `
@@ -1056,7 +1128,7 @@ const PANELS={
   <div class="card"><h3>전시 피드백<span class="en">Exhibition feedback · helps the museum plan future shows</span></h3>
     <p class="bodytext" style="font-size:12px;color:var(--muted);margin:0 0 8px">미술관에 전해져요. 솔직한 의견이 다음 전시를 더 좋게 만들어요.<span class="en" style="display:block;font-style:italic">Shared with the museum — your honest take shapes the next exhibition.</span></p>
     <p class="bodytext" style="font-size:12.5px;color:var(--navy);font-weight:600;margin:14px 0 6px">이 전시에서 가장 좋았던 작품 <span class="en" style="font-weight:400;color:var(--muted)">My favorite work</span></p>
-    <select id="favWork" class="ta" style="min-height:auto"><option value="">선택하세요 · Select</option>${WORKS.map(w=>`<option value="${w.id}">${w.tKr} · ${w.aKr}</option>`).join("")}</select>
+    <select id="favWork" class="ta" style="min-height:auto"><option value="">선택하세요 · Select</option>${WORKS.map(w=>`<option value="${w.id}">${w.tKr} (${w.tEn}) · ${w.aKr} (${w.aEn})</option>`).join("")}</select>
     <p class="bodytext" style="font-size:12.5px;color:var(--navy);font-weight:600;margin:14px 0 6px">왜 좋았나요? (복수 선택) <span class="en" style="font-weight:400;color:var(--muted)">Why? (choose any)</span></p>
     <div class="chips" id="reasonChips"></div>
     <p class="bodytext" style="font-size:12.5px;color:var(--navy);font-weight:600;margin:16px 0 0">전시 전반은 어땠나요? <span class="en" style="font-weight:400;color:var(--muted)">How was the exhibition overall?</span></p>
@@ -1073,7 +1145,7 @@ const PANELS={
  report(){
   const cl=clRate(), sat=satAvg(), comp=composite(), lv=creatorLevel(), w=W(), today=new Date().toLocaleDateString('en-CA'), verify=vid();
   const selfPct=k=>{const v=(S.survey.self||{})[k];return v?Math.round(v/5*100):0;};
-  const cap=`${w.tKr} 〈${w.tEn}〉 · ${w.aKr} (${w.aEn}) — 서서울미술관 《서서울의 투명한 청소년 기계》\n내가 미디어 크리에이터로서 해석한 미디어아트입니다. A media artwork I reinterpreted as a youth media creator.\n#서서울미술관 #SeoSeoulMuseum #서서울의투명한청소년기계 #MediaCreator #OnAndStudio #미디어아트 #MediaArt #${w.aEn.replace(/[^A-Za-z0-9]+/g,'')}`;
+  const cap=`${w.tKr} 〈${w.tEn}〉 · ${w.aKr} (${w.aEn}) · ${w.year} — 서서울미술관 《서서울의 투명한 청소년 기계》 Seo-Seoul Museum of Art, The Transparent | Adolescent | Machine of Western Seoul\n내가 미디어 크리에이터로서 해석한 미디어아트입니다. A media artwork I reinterpreted as a youth media creator.\n#서서울미술관 #SeoSeoulMuseum #서서울의투명한청소년기계 #MediaCreator #OnAndStudio #미디어아트 #MediaArt #${w.aEn.replace(/[^A-Za-z0-9]+/g,'')}`;
   return `
   <div class="phead"><span class="eyebrow">Step 11 · 크리에이터 리포트 · Creator report</span>
     <h2>나의 크리에이터 리포트<span class="en">My creator report</span></h2>
@@ -1103,14 +1175,14 @@ const PANELS={
     <div class="cert-title">수료증</div>
     <div class="cert-sub">CERTIFICATE OF COMPLETION</div>
     <div class="cert-rule"></div>
-    <p class="cert-body">아래 크리에이터는 서서울미술관 《서서울의 투명한 청소년 기계》와 연계한 <b>청소년 미디어 크리에이터 프로그램</b>을 이수하고, 작품 〈${w.tKr}〉(${w.aKr})의 미디어 도슨트 콘텐츠를 책임 있게 제작하였기에 이 증서를 수여합니다.<span class="en">This certifies that the creator below completed the Youth Media Creator Program for the exhibition and responsibly produced media-docent content for the artwork.</span></p>
+    <p class="cert-body">아래 크리에이터는 서서울미술관 《서서울의 투명한 청소년 기계》와 연계한 <b>청소년 미디어 크리에이터 프로그램</b>을 이수하고, 작품 〈${w.tKr}〉(${w.aKr})의 미디어 도슨트 콘텐츠를 책임 있게 제작하였기에 이 증서를 수여합니다.<span class="en">This certifies that the creator below completed the <b>Youth Media Creator Program</b> linked to the exhibition <i>The Transparent | Adolescent | Machine of Western Seoul</i> at the Seo-Seoul Museum of Art, and responsibly produced media-docent content for the artwork 〈${w.tEn}〉 (${w.aEn}).</span></p>
     <div class="cert-name">${esc(S.user.name)}</div>
     <div class="cert-grid">
       <div class="cert-row"><span class="k">프로그램 / Program</span><span class="v">Public Media Creator · OnAnd Studio</span></div>
-      <div class="cert-row"><span class="k">전시 / Exhibition</span><span class="v">서서울의 투명한 청소년 기계 (2026.5.14–7.26)</span></div>
+      <div class="cert-row"><span class="k">전시 / Exhibition</span><span class="v">서서울의 투명한 청소년 기계 · The Transparent | Adolescent | Machine of Western Seoul (2026.5.14–7.26)</span></div>
       <div class="cert-row"><span class="k">그룹 / Track</span><span class="v">${esc(S.user.group)}</span></div>
-      <div class="cert-row"><span class="k">담당 작품 / Artwork</span><span class="v">${w.tKr} · ${w.aKr}</span></div>
-      <div class="cert-row"><span class="k">크리에이터 레벨 / Creator level</span><span class="v">Lv.${lv.n} ${lv.kr}</span></div>
+      <div class="cert-row"><span class="k">담당 작품 / Artwork</span><span class="v">${w.tKr} (${w.tEn}) · ${w.aKr} (${w.aEn}) · ${w.year}</span></div>
+      <div class="cert-row"><span class="k">크리에이터 레벨 / Creator level</span><span class="v">Lv.${lv.n} ${lv.ko} · ${lv.kr}</span></div>
       <div class="cert-row"><span class="k">저작권 교육 / Copyright</span><span class="v">${S.quizPassed?'이수 Completed · 100%':'미이수 Incomplete'}</span></div>
       <div class="cert-row"><span class="k">발급일 / Issued</span><span class="v">${today}</span></div>
       <div class="cert-row"><span class="k">발급번호 / Certificate no.</span><span class="v">${verify}</span></div>
@@ -1163,7 +1235,7 @@ const PANELS={
       <a class="btn ghost" href="https://www.instagram.com" target="_blank" rel="noopener">Instagram Reels</a>
       <a class="btn ghost" href="https://www.youtube.com/upload" target="_blank" rel="noopener">YouTube Shorts</a>
     </div>
-    <p class="bodytext" style="font-size:11.5px;color:var(--faint);margin-top:10px">영상 파일은 업로드 폴더에서 받아 세로 9:16 · 30–60초로 올려요. 게시는 학예사·선생님 검수 후에 해요.<span class="en" style="font-style:italic"> Get the file from the upload folder; post after curator/teacher review.</span></p>
+    <p class="bodytext" style="font-size:11.5px;color:var(--faint);margin-top:10px">영상 파일은 업로드 폴더에서 받아 세로 9:16 · 30–60초로 올려요. 게시는 프로그램 학예사/기획자 검수 후에 해요.<span class="en" style="font-style:italic"> Get the file from the upload folder; post after program curator/planner review.</span></p>
   </div>
 
   <div id="beLinks" class="noprint"></div>
@@ -1217,15 +1289,15 @@ function initQuiz(){
 function initStory(){
  const hk=document.getElementById('hookText');if(hk){hk.value=S.hook||'';hk.addEventListener('input',()=>{S.hook=hk.value;save();});}
  if(!S.storyboard)S.storyboard=[
-   {t:"작품 3초",n:"전체샷 — 작품이 처음 등장 (궁금증 유발)"},
-   {t:"내 컷",n:"인트로 내레이션 / 첫인상 리액션"},
-   {t:"작품 3초",n:"디테일 클로즈업 — ‘여기 보이세요?’"},
-   {t:"내 컷",n:"해설 / 키워드 설명"},
-   {t:"작품 3초",n:"움직이는 부분 또는 빛·질감"},
-   {t:"내 컷",n:"마무리 질문 — 관람객에게"}];
+   {t:"작품 3초",n:"전체샷 — 작품이 처음 등장 (궁금증 유발) / Wide — the work first appears (spark curiosity)"},
+   {t:"내 컷",n:"인트로 내레이션 / 첫인상 리액션 / Intro narration / first-impression reaction"},
+   {t:"작품 3초",n:"디테일 클로즈업 — ‘여기 보이세요?’ / Detail close-up — ‘can you see this?’"},
+   {t:"내 컷",n:"해설 / 키워드 설명 / My commentary / keyword explanation"},
+   {t:"작품 3초",n:"움직이는 부분 또는 빛·질감 / A moving part, or light & texture"},
+   {t:"내 컷",n:"마무리 질문 — 관람객에게 / Closing question — to the viewer"}];
  const wrap=document.getElementById('sbWrap');
  function draw(){wrap.innerHTML=S.storyboard.map((r,i)=>`<div class="sbrow ${r.t==='작품 3초'?'art':''}">
-   <select data-i="${i}" class="tsel"><option ${r.t==='작품 3초'?'selected':''}>작품 3초</option><option ${r.t==='내 컷'?'selected':''}>내 컷</option></select>
+   <select data-i="${i}" class="tsel"><option value="작품 3초" ${r.t==='작품 3초'?'selected':''}>작품 3초 · Artwork 3 sec</option><option value="내 컷" ${r.t==='내 컷'?'selected':''}>내 컷 · My shot</option></select>
    <input data-i="${i}" class="tin" value="${esc(r.n||'')}" placeholder="내용 / 대사 메모 · note">
    <button class="del" data-i="${i}" title="삭제 Delete">×</button></div>`).join("");
   wrap.querySelectorAll('.tsel').forEach(s=>s.addEventListener('change',()=>{S.storyboard[+s.dataset.i].t=s.value;save();draw();}));
@@ -1253,7 +1325,7 @@ function initSubmit(){
    const row=document.getElementById('subStat'),ico=document.getElementById('subIco'),t=document.getElementById('subT'),sub=document.getElementById('subSub');
    row.className='statusrow '+(S.submitted?'done':'wait');ico.textContent=S.submitted?'✓':'…';
    t.textContent=S.submitted?'제출 완료 · Submitted':'제출 대기 · Not submitted yet';
-   sub.textContent=S.submitted?'학예사·멘토 검수가 시작돼요. Review begins.':'업로드 후 아래 버튼을 눌러 주세요. Press the button after uploading.';
+   sub.textContent=S.submitted?'프로그램 학예사/기획자·멘토 검수가 시작돼요. Review begins.':'업로드 후 아래 버튼을 눌러 주세요. Press the button after uploading.';
    btn.className='btn '+(S.submitted?'ghost':'go');
    btn.innerHTML=S.submitted?'제출 취소 · Undo':'제출 완료로 표시하기 · Mark as submitted';
    toast(S.submitted?'제출 완료로 표시했어요':'제출을 취소했어요',S.submitted?'Marked as submitted':'Submission undone');
@@ -1280,16 +1352,40 @@ function initSurvey(){
  best.addEventListener('input',()=>{S.survey.best=best.value;save();});
  imp.addEventListener('input',()=>{S.survey.improve=imp.value;save();});
 }
+async function initFeedback(){
+ if(!S.submitted)return;
+ const vi=document.getElementById('vimeoInput'),vb=document.getElementById('vimeoSave'),vm=document.getElementById('vimeoMsg');
+ if(vb&&vi)vb.addEventListener('click',()=>{S.vimeo=(vi.value||'').trim();save();if(typeof dbSaveStudent==='function')dbSaveStudent();if(vm){vm.textContent='저장됨 · Saved';setTimeout(()=>{if(vm)vm.textContent='';},2500);}});
+ const fb=(typeof SERVER_FB!=='undefined'&&SERVER_FB)?SERVER_FB:{};
+ const dashed='<div class="card" style="border-style:dashed"><p class="bodytext" style="margin:0;font-size:12.5px;color:var(--muted)">';
+ const mEl=document.getElementById('fbMentor');
+ if(mEl)mEl.innerHTML=fb.mentor?('<div class="fb"><div class="who"><div class="av" style="background:var(--teal)">M</div><div><b>멘토 · Mentor</b><br><span>OnAnd Studio</span></div></div><p>'+esc(fb.mentor)+'</p></div>'):(dashed+'멘토 피드백이 아직 도착하지 않았어요.<span class="en" style="display:block;font-style:italic">Mentor feedback hasn’t arrived yet.</span></p></div>');
+ const cEl=document.getElementById('fbCurator');
+ if(cEl)cEl.innerHTML=fb.curator?('<div class="fb"><div class="who"><div class="av" style="background:var(--navy)">C</div><div><b>프로그램 학예사/기획자 · Program Curator/Planner</b><br><span>Seo-Seoul Museum of Art</span></div></div><p>'+esc(fb.curator)+'</p></div>'):(dashed+'프로그램 학예사/기획자 피드백이 아직 도착하지 않았어요.<span class="en" style="display:block;font-style:italic">Program curator/planner feedback hasn’t arrived yet.</span></p></div>');
+ const sEl=document.getElementById('fbScore');
+ if(sEl){const sc=fb.score;if(sc&&typeof sc==='object'){const order=[['hook','HOOK'],['story','Story'],['visual','Visual'],['emotion','Emotion'],['easy','Easy']];sEl.innerHTML='<div class="card" style="background:var(--navy);color:#fff;border:0"><h3 style="color:#fff">ONAND Creator Score<span class="en" style="color:#aebacb">How your video scored</span></h3><div style="margin-top:12px">'+order.map(o=>'<div style="display:flex;align-items:center;justify-content:space-between;padding:9px 0;border-top:1px solid rgba(255,255,255,.1)"><span style="font-family:var(--mono);font-size:13px;color:#e7edf4">'+o[1]+'</span><span style="color:var(--amber);font-size:16px;letter-spacing:2px">'+stars(Math.max(0,Math.min(5,+sc[o[0]]||0)))+'</span></div>').join('')+'</div></div>';}else sEl.innerHTML='';}
+ const rEl=document.getElementById('fbReact');
+ if(rEl){let r=null;if(typeof dbMyReactions==='function')r=await dbMyReactions();
+   if(r&&r.count){const tagLabel={easy:'가장 이해하기 쉬웠어요 · Easiest',fun:'재미있어요 · Fun',share:'공유했어요 · Shared',live:'직접 보고 싶어요 · Want to see live'};const tags=r.tags||{};
+     const chips=Object.keys(tagLabel).filter(k=>tags[k]).map(k=>'<span class="chip"><b style="font-family:var(--mono);color:var(--amberd)">'+tags[k]+'</b> '+tagLabel[k]+'</span>').join('');
+     rEl.innerHTML='<div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-top:8px"><div style="font-size:26px;color:var(--amber);letter-spacing:2px">'+stars(Math.round(r.avg||0))+'<span style="font-size:13px;color:var(--muted);letter-spacing:0"> '+(r.avg?(+r.avg).toFixed(1):'—')+'/5</span></div><div style="font-family:var(--mono);font-size:12px;color:var(--muted)">관람객 '+r.count+'명 응답 · '+r.count+' responses</div></div>'+(chips?'<div class="chips" style="margin-top:14px">'+chips+'</div>':'');
+   } else rEl.innerHTML='<p class="bodytext" style="font-size:12.5px;color:var(--muted);margin:6px 0 0">아직 관람객 반응이 없어요. 전시장 QR로 평가가 들어오면 여기에 표시돼요.<span class="en" style="display:block;font-style:italic">No audience reactions yet — they appear here once people rate via the gallery QR.</span></p>';
+ }
+}
 function initReport(){
  if(typeof dbIssueCertificate==='function')dbIssueCertificate();
  const be=document.getElementById('beLinks');
  if(be&&typeof backendReady==='function'&&backendReady()){
-   const base=location.origin+location.pathname;
-   const rl=base+'#r/'+(S.publicCode||'(제출 후 생성됨)'), vl=base+'#verify/'+vid();
-   be.innerHTML='<div class="card"><h3>백엔드 연결됨 · Live backend<span class="en">audience rating & verification links</span></h3>'+
-     '<p class="bodytext" style="font-size:12.5px;margin-top:8px">전시장 QR은 ‘관람객 평가’ 링크로, 수료증 QR은 ‘조회’ 링크로 만들어요.<span class="en" style="font-style:italic"> Build the gallery QR from the rating link, and the certificate QR from the verification link.</span></p>'+
-     '<div style="display:flex;flex-direction:column;gap:7px;margin-top:10px">'+
-     '<div style="font-family:var(--mono);font-size:11px;color:var(--navy);word-break:break-all">'+esc(rl)+'</div>'+
+   const base=appBase();
+   const hasCode=!!S.publicCode;
+   const rl=base+'#r/'+(S.publicCode||''), vl=base+'#verify/'+vid();
+   const warn=isLocalFile()?'<p class="bodytext" style="font-size:11.5px;color:var(--amberd);margin-top:8px">⚠ 지금은 로컬 파일(file://)이라 QR이 동작하지 않아요. 배포 후 사용하거나, 상단 CONFIG의 <b>appUrl</b>에 배포 주소를 넣어 주세요.<span class="en" style="font-style:italic"> Running as a local file — set CONFIG.appUrl to your deployed address for working QR codes.</span></p>':'';
+   const qrCell=(label,en,url,active)=>'<div class="qrbox" style="flex:1;min-width:150px">'+(active?'<img src="'+qrImg(url,200)+'" alt="QR" loading="lazy">':'<div style="height:158px;display:flex;align-items:center;justify-content:center;color:var(--faint);font-size:12px;text-align:center;padding:10px">제출 완료 후 생성돼요<br>Generated after submit</div>')+'<div class="cap">'+label+'<span class="en">'+en+'</span></div></div>';
+   be.innerHTML='<div class="card"><h3>백엔드 연결됨 · Live backend<span class="en">audience rating & verification QR</span></h3>'+
+     '<p class="bodytext" style="font-size:12.5px;margin-top:8px">전시장 QR은 ‘관람객 평가’ 링크로, 수료증 QR은 ‘조회’ 링크로 만들어요.<span class="en" style="font-style:italic"> Build the gallery QR from the rating link, and the certificate QR from the verification link.</span></p>'+warn+
+     '<div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:14px">'+qrCell('전시장 QR · 관람객 평가','Gallery QR · audience rating',rl,hasCode)+qrCell('수료증 QR · 진위 조회','Certificate QR · verify',vl,true)+'</div>'+
+     '<div style="display:flex;flex-direction:column;gap:7px;margin-top:12px">'+
+     '<div style="font-family:var(--mono);font-size:11px;color:var(--navy);word-break:break-all">'+(hasCode?esc(rl):'관람객 평가 링크는 제출 완료 후 생성돼요 · rating link appears after you submit')+'</div>'+
      '<div style="font-family:var(--mono);font-size:11px;color:var(--navy);word-break:break-all">'+esc(vl)+'</div></div>'+
      '<div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:12px"><button class="btn ghost" id="copyReact">관람객 평가 링크 복사 <span class="en">Copy rating link</span></button><button class="btn ghost" id="copyVerify">수료증 조회 링크 복사 <span class="en">Copy verify link</span></button></div></div>';
    const cp=(t,k,e)=>{if(navigator.clipboard&&navigator.clipboard.writeText)navigator.clipboard.writeText(t).then(()=>toast(k,e));};
@@ -1327,6 +1423,18 @@ const COHORT=[
  {n:"Jiwoo A.",g:"Dwight School Seoul",w:"핑키 박스 Pinky Box",sub:true,sat:4.7,comp:100,self:[5,5,5,4],fav:"w11",why:"interactive",exh:5},
 ];
 function avg(a){return a.length?a.reduce((x,y)=>x+y,0)/a.length:0;}
+function fbEditorCard(x,i){const sc=x.score||{};
+ return '<div class="card" data-i="'+i+'" style="margin-top:12px">'+
+   '<div style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;align-items:baseline"><b style="color:var(--navy)">'+esc(x.n||'—')+(x.sub?' <span class="pill-y">제출 Submitted</span>':' <span class="pill-n">대기 Pending</span>')+'</b><span style="font-family:var(--mono);font-size:11px;color:var(--muted)">'+esc(x.w||'')+'</span></div>'+
+   (x.vimeo?'<p class="bodytext" style="font-size:11px;margin:6px 0 0"><a href="'+esc(x.vimeo)+'" target="_blank" rel="noopener" style="color:var(--teald);font-family:var(--mono)">▶ '+esc(x.vimeo)+'</a></p>':'')+
+   '<div style="margin-top:10px"><label class="bodytext" style="font-size:12px;font-weight:700">멘토 코멘트 · Mentor</label><textarea class="ta fbM" data-i="'+i+'" style="min-height:60px" placeholder="멘토 피드백 · mentor feedback">'+esc(x.mentor||'')+'</textarea></div>'+
+   '<div style="margin-top:8px"><label class="bodytext" style="font-size:12px;font-weight:700">프로그램 학예사/기획자 코멘트 · Program Curator/Planner</label><textarea class="ta fbC" data-i="'+i+'" style="min-height:60px" placeholder="프로그램 학예사/기획자 피드백 · program curator/planner feedback">'+esc(x.curator||'')+'</textarea></div>'+
+   '<div style="margin-top:8px"><label class="bodytext" style="font-size:12px;font-weight:700">Creator Score (0–5)</label><div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:5px">'+
+     [['hook','HOOK'],['story','Story'],['visual','Visual'],['emotion','Emotion'],['easy','Easy']].map(o=>'<span style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:var(--muted)">'+o[1]+'<input type="number" min="0" max="5" class="fbS" data-i="'+i+'" data-k="'+o[0]+'" value="'+(sc[o[0]]!=null?sc[o[0]]:'')+'" style="width:44px;padding:4px;border:1px solid var(--line);border-radius:6px;font-family:var(--mono)"></span>').join('')+
+   '</div></div>'+
+   '<div style="margin-top:8px"><label class="bodytext" style="font-size:12px;font-weight:700">영상 링크 · Vimeo / YouTube</label><input class="ta fbV" data-i="'+i+'" style="min-height:auto" value="'+esc(x.vimeo||'')+'" placeholder="https://vimeo.com/… or https://youtu.be/…"></div>'+
+   '<div style="margin-top:10px;display:flex;align-items:center;gap:10px"><button class="btn go fbSave" data-i="'+i+'">저장 <span class="en">Save</span></button><span class="fbSaveMsg" data-i="'+i+'" style="font-size:11.5px;color:var(--teald)"></span></div>'+
+ '</div>';}
 function renderAdmin(){
  const live=(typeof S!=='undefined'&&S.user)?[{n:S.user.name,g:S.user.group,w:W().tKr+' '+W().tEn,sub:!!S.submitted,sat:(satAvg()||0),comp:composite(),
    self:[(S.survey.self||{}).copyright||0,(S.survey.self||{}).create||0,(S.survey.self||{}).collab||0,(S.survey.self||{}).confid||0],
@@ -1385,6 +1493,10 @@ function renderAdmin(){
      <p class="bodytext" style="font-size:12px;color:var(--muted);margin-top:14px">어떤 작품이 왜 인기 있고 덜 주목받았는지, 전시 만족도와 함께 자동 정리되어 미술관에 전달됩니다.<span class="en" style="display:block;font-style:italic">Which works resonated and why — auto-summarized with exhibition satisfaction for the museum.</span></p>
    </div>
 
+   <h3 style="margin:30px 0 0;font-size:17px;color:var(--navy);letter-spacing:-0.02em">참여자 피드백 입력 <span class="en" style="font-size:13px;color:var(--muted);font-weight:400">Feedback to participants</span></h3>
+   <p class="bodytext" style="margin-top:6px;color:var(--muted);font-size:12.5px">학생별 멘토·프로그램 학예사/기획자 코멘트와 Creator Score, 영상(Vimeo/YouTube) 링크를 입력해 저장하면, 참여자의 ‘피드백’ 화면에 바로 표시돼요.<span class="en" style="display:block;font-style:italic">Enter mentor and program-curator/planner comments, Creator Score and the video link per student — they appear instantly on the participant’s Feedback screen.</span></p>
+   ${_bk?`<div id="fbEditors">${all.map((x,i)=>fbEditorCard(x,i)).join('')}</div>`:`<div class="flag" style="margin-top:10px">백엔드가 연결되면 학생별 피드백을 입력할 수 있어요. 지금은 데모 데이터예요.<span class="en">Connect the backend to enter per-student feedback. Currently showing demo data.</span></div>`}
+
    <h3 style="margin:30px 0 0;font-size:17px;color:var(--navy);letter-spacing:-0.02em">ONAND Studio · 플랫폼 파일럿 <span class="en" style="font-size:13px;color:var(--muted);font-weight:400">Platform pilot</span></h3>
    <div class="card" style="background:var(--navy);color:#fff;border:0">
      <p class="bodytext" style="color:#e7edf4;margin:0">이 프로그램은 <b style="color:#9fe3d8">ONAND Studio</b>의 서서울미술관 파일럿으로 운영되고 있어요. 미술관·학교·기관이 참여형 프로그램을 ‘기획·운영·분석’하는 노코드 SaaS입니다.<span class="en" style="display:block;color:#aebacb;font-style:italic;margin-top:4px">This program runs as the SeMA pilot of ONAND Studio — a no-code SaaS for designing, running and analyzing participatory programs.</span></p>
@@ -1403,6 +1515,17 @@ function renderAdmin(){
  if(b=document.getElementById('adminPrint'))b.addEventListener('click',()=>window.print());
  if(b=document.getElementById('adminBack'))b.addEventListener('click',backToStudent);
  if(b=document.getElementById('adminOut'))b.addEventListener('click',lockAdmin);
+ document.querySelectorAll('.fbSave').forEach(btn=>btn.addEventListener('click',async()=>{
+   const i=+btn.dataset.i,x=all[i];if(!x||!x.id){const m0=document.querySelector('.fbSaveMsg[data-i="'+i+'"]');if(m0){m0.style.color='var(--rose)';m0.textContent='저장 불가(백엔드 필요) · backend required';}return;}
+   const q=(sel)=>document.querySelector(sel+'[data-i="'+i+'"]');
+   const mentor=(q('.fbM')||{}).value||'',curator=(q('.fbC')||{}).value||'',vimeo=(q('.fbV')||{}).value||'';
+   const score={};document.querySelectorAll('.fbS[data-i="'+i+'"]').forEach(inp=>{if(inp.value!=='')score[inp.dataset.k]=Math.max(0,Math.min(5,+inp.value||0));});
+   const msg=document.querySelector('.fbSaveMsg[data-i="'+i+'"]');let code=ADMIN_CODE;try{code=sessionStorage.getItem('onand-admin-code')||ADMIN_CODE;}catch(e){}
+   btn.disabled=true;if(msg){msg.style.color='var(--teald)';msg.textContent='저장 중… · Saving';}
+   try{await dbAdminSetFeedback(code,x.id,mentor,curator,Object.keys(score).length?score:null,vimeo||null);x.mentor=mentor;x.curator=curator;x.vimeo=vimeo;x.score=score;if(msg)msg.textContent='저장됨 · Saved';}
+   catch(e){if(msg){msg.style.color='var(--rose)';msg.textContent='실패 · Failed';}}
+   finally{btn.disabled=false;setTimeout(()=>{if(msg)msg.textContent='';},2600);}
+ }));
 }
 
 </script>
